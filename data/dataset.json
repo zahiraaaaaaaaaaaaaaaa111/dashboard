@@ -1,0 +1,7 @@
+{
+  "total_gambar": 1200,
+  "pembagian": { "train": 840, "val": 240, "test": 120 },
+  "label_per_kelas": { "helmet": 2650, "no_helmet": 1180 },
+  "sumber": "Pexels dan Pixabay (lisensi terbuka)",
+  "diperbarui": "2026-10-18"
+}
