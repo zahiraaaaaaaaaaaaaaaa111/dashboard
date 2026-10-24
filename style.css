@@ -94,3 +94,12 @@ table.cm th, table.cm td {
   margin-bottom: 12px;
   font-size: 14px;
 }
+
+.panel-model {
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  margin-bottom: 12px; font-size: 14px;
+}
+#alamatAPI {
+  background: #0f172a; color: #e2e8f0; border: 1px solid #334155;
+  border-radius: 8px; padding: 8px 12px; min-width: 280px;
+}

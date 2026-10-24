@@ -1,5 +1,7 @@
 // =====================================================
-//  Dashboard Deteksi Helm / APD  -  app.js (versi final dummy)
+//  Dashboard Deteksi Helm / APD  -  app.js
+//  Sumber data: dummy (JSON) ATAU model best.pt (lewat backend)
+//  Sumber video: file video ATAU kamera live (HP / webcam)
 // =====================================================
 
 // ---------- Tab (navigasi) ----------
@@ -10,17 +12,13 @@ function bukaTab(nama) {
   tab.forEach(t => t.classList.toggle('active', t.id === nama));
   tombol.forEach(b => b.classList.toggle('active', b.dataset.tab === nama));
 }
-
-tombol.forEach(b => {
-  b.addEventListener('click', () => bukaTab(b.dataset.tab));
-});
-
-bukaTab('live');   // tab awal
+tombol.forEach(b => b.addEventListener('click', () => bukaTab(b.dataset.tab)));
+bukaTab('live');
 
 // ---------- Membaca file JSON ----------
 async function muatJSON(path) {
-  const respon = await fetch(path);   // minta file
-  return await respon.json();         // ubah teks jadi objek JavaScript
+  const respon = await fetch(path);
+  return await respon.json();
 }
 
 function kartu(label, angka, warna = '') {
@@ -99,7 +97,9 @@ async function isiModel() {
 }
 isiModel();
 
-// ---------- Tab Monitoring Live ----------
+// =====================================================
+//  Tab Monitoring Live
+// =====================================================
 let dataLive, grafikTren, grafikDonat;
 let detikTerakhir = -1, totalHelm = 0, totalNo = 0;
 
@@ -111,19 +111,111 @@ const daftarVideo = [
   { nama: 'Video 4 - dummy_04', file: 'data/detections_04.json' }
 ];
 
-// Satu-satunya fungsi yang nanti diganti saat model asli siap
+// ---------- Pengaturan model best.pt ----------
+const ALAMAT_AWAL = 'http://localhost:8000';  // alamat backend (bisa diganti di kolom dashboard)
+let deteksiModel = [];                        // hasil terakhir dari best.pt
+let sedangKirim = false;
+let kameraStream = null;
+let terakhirFile = daftarVideo[0].file;
+
+const modelAktif = () => {
+  const cb = document.getElementById('pakaiModel');
+  return !!cb && cb.checked;
+};
+const alamatAPI = () =>
+  document.getElementById('alamatAPI').value.trim().replace(/\/$/, '') + '/detect';
+
+function setKoneksi(ok, pesan) {
+  const el = document.getElementById('koneksi');
+  if (!el) return;
+  el.textContent = pesan;
+  el.style.color = ok ? '#22c55e' : '#ef4444';
+}
+
+// Mengirim 1 frame ke backend, menerima kotak dari best.pt
+async function jalankanModel() {
+  const v = document.getElementById('video');
+  if (!modelAktif() || !v || !v.videoWidth || v.paused || sedangKirim) return;
+  sedangKirim = true;
+  try {
+    const c = document.createElement('canvas');
+    c.width = 640;
+    c.height = Math.round(640 * v.videoHeight / v.videoWidth);
+    c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+    const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.7));
+    const fd = new FormData();
+    fd.append('file', blob, 'frame.jpg');
+    const res = await fetch(alamatAPI(), { method: 'POST', body: fd });
+    if (!res.ok) throw new Error('Status ' + res.status);
+    deteksiModel = await res.json();
+    setKoneksi(true, 'Backend terhubung');
+  } catch (e) {
+    console.error('Backend error:', e);
+    setKoneksi(false, 'Backend TIDAK terhubung');
+  }
+  sedangKirim = false;
+}
+setInterval(jalankanModel, 150);
+
+// ---------- Kamera live ----------
+async function mulaiKamera() {
+  const v = document.getElementById('video');
+  try {
+    kameraStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment' },   // kamera belakang HP; di laptop otomatis webcam
+      audio: false
+    });
+  } catch (e) {
+    alert('Kamera tidak bisa dibuka: ' + e.message +
+          '\nPastikan izin kamera diberikan, dan halaman dibuka lewat https atau localhost.');
+    document.getElementById('pilihVideo').value = terakhirFile;
+    return;
+  }
+  v.removeAttribute('src');
+  v.srcObject = kameraStream;
+  v.controls = false;
+  v.loop = false;
+  v.play();
+  const cb = document.getElementById('pakaiModel');
+  cb.checked = true;          // kamera live wajib memakai model
+  cb.disabled = true;
+  deteksiModel = [];
+  resetHitungan();
+}
+
+function hentikanKamera() {
+  if (kameraStream) {
+    kameraStream.getTracks().forEach(t => t.stop());
+    kameraStream = null;
+  }
+  const v = document.getElementById('video');
+  v.srcObject = null;
+  v.controls = true;
+  v.loop = true;
+  document.getElementById('pakaiModel').disabled = false;
+}
+
+function resetHitungan() {
+  detikTerakhir = -1;  totalHelm = 0;  totalNo = 0;
+  grafikTren.data.labels = [];  grafikTren.data.datasets[0].data = [];  grafikTren.update();
+  grafikDonat.data.datasets[0].data = [0, 0];  grafikDonat.update();
+}
+
+// ---------- Sumber kotak: model ATAU dummy ----------
 function ambilDeteksi(t) {
-  const hasil = [];
+  if (modelAktif()) return deteksiModel;         // dari best.pt
+
+  const hasil = [];                              // dari keyframe dummy
   for (const tr of dataLive.tracks) {
     const k = tr.keyframes, awal = k[0], akhir = k[k.length - 1];
-    if (t < awal.t - 0.5 || t > akhir.t + 0.5) continue;   // di luar rentang: tidak tampil
+    if (t < awal.t - 0.5 || t > akhir.t + 0.5) continue;
     let kotak = awal;
     if (t >= akhir.t) kotak = akhir;
     else if (t > awal.t) {
       for (let i = 0; i < k.length - 1; i++) {
         if (t >= k[i].t && t <= k[i + 1].t) {
-          const u = (t - k[i].t) / (k[i + 1].t - k[i].t);   // 0 sampai 1
-          const m = (a, b) => a + (b - a) * u;              // titik di antara a dan b
+          const u = (t - k[i].t) / (k[i + 1].t - k[i].t);
+          const m = (a, b) => a + (b - a) * u;
           kotak = { cls: k[i].cls, x: m(k[i].x, k[i+1].x), y: m(k[i].y, k[i+1].y),
                     w: m(k[i].w, k[i+1].w), h: m(k[i].h, k[i+1].h) };
           break;
@@ -167,10 +259,9 @@ function perbaruiAngka(dets) {
   st.textContent = no > 0 ? 'PELANGGARAN: ' + no + ' pekerja tanpa helm' : 'Aman: semua pekerja memakai helm';
   st.className = 'angka ' + (no > 0 ? 'merah' : 'hijau');
 
-  // grafik diperbarui sekali per detik video
   const v = document.getElementById('video');
   const detik = Math.floor(v.currentTime);
-  if (detik < detikTerakhir) {                       // video diulang atau diputar mundur
+  if (detik < detikTerakhir) {
     grafikTren.data.labels = [];  grafikTren.data.datasets[0].data = [];
     totalHelm = 0;  totalNo = 0;
   }
@@ -195,15 +286,24 @@ function putaran() {
 }
 
 async function isiLive() {
-  dataLive = await muatJSON(daftarVideo[0].file);   // video pertama sebagai awalan
+  dataLive = await muatJSON(daftarVideo[0].file);
+  let alamatTersimpan = ALAMAT_AWAL;
+  try { alamatTersimpan = localStorage.getItem('alamatAPI') || ALAMAT_AWAL; } catch (e) {}
+
   document.getElementById('live').innerHTML = `
-    <h2>Monitoring Live (dari AI Engineer) · mode dummy</h2>
+    <h2>Monitoring Live · sumber kotak: dummy atau model best.pt</h2>
     <select id="pilihVideo">
       ${daftarVideo.map(v => `<option value="${v.file}">${v.nama}</option>`).join('')}
+      <option value="kamera">Kamera Live (HP / webcam)</option>
     </select>
+    <div class="panel-model">
+      <label><input type="checkbox" id="pakaiModel"> Pakai model best.pt</label>
+      <input id="alamatAPI" value="${alamatTersimpan}" placeholder="Alamat backend">
+      <span id="koneksi" style="color:#94a3b8">belum dicoba</span>
+    </div>
     <div class="live-grid">
       <div class="vwrap">
-        <video id="video" src="${dataLive.video}" controls muted loop></video>
+        <video id="video" src="${dataLive.video}" controls muted loop playsinline></video>
         <canvas id="kanvas"></canvas>
       </div>
       <div class="kolom-kpi">
@@ -224,7 +324,7 @@ async function isiLive() {
     type: 'line',
     data: { labels: [], datasets: [{ label: 'Kepatuhan (%)', data: [], borderColor: '#38bdf8', tension: .3 }] },
     options: { maintainAspectRatio: false, animation: false,
-      scales: { y: { min: 0, max: 100, ...teks }, x: { ...teks, title: { display: true, text: 'Detik video', color: '#94a3b8' } } },
+      scales: { y: { min: 0, max: 100, ...teks }, x: { ...teks, title: { display: true, text: 'Detik', color: '#94a3b8' } } },
       plugins: { legend: { labels: { color: '#e2e8f0' } }, title: { display: true, text: 'Tren Kepatuhan', color: '#e2e8f0' } } }
   });
   grafikDonat = new Chart(document.getElementById('cDonat'), {
@@ -234,15 +334,27 @@ async function isiLive() {
       plugins: { legend: { labels: { color: '#e2e8f0' } }, title: { display: true, text: 'Total Deteksi', color: '#e2e8f0' } } }
   });
 
-  // Saat menu pilihan video diganti
+  // Simpan alamat backend supaya tidak perlu mengetik ulang
+  document.getElementById('alamatAPI').addEventListener('change', e => {
+    try { localStorage.setItem('alamatAPI', e.target.value.trim()); } catch (err) {}
+  });
+
+  // Saat checkbox model diubah
+  document.getElementById('pakaiModel').addEventListener('change', () => {
+    deteksiModel = [];
+    resetHitungan();
+  });
+
+  // Saat menu sumber diganti
   document.getElementById('pilihVideo').addEventListener('change', async (e) => {
-    dataLive = await muatJSON(e.target.value);        // baca JSON video yang dipilih
+    if (e.target.value === 'kamera') { await mulaiKamera(); return; }
+    hentikanKamera();
+    terakhirFile = e.target.value;
+    dataLive = await muatJSON(terakhirFile);
     const v = document.getElementById('video');
-    v.src = dataLive.video;                           // ganti videonya
+    v.src = dataLive.video;
     v.play();
-    detikTerakhir = -1;  totalHelm = 0;  totalNo = 0; // reset hitungan
-    grafikTren.data.labels = [];  grafikTren.data.datasets[0].data = [];  grafikTren.update();
-    grafikDonat.data.datasets[0].data = [0, 0];  grafikDonat.update();
+    resetHitungan();
   });
 
   putaran();
