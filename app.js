@@ -1,6 +1,6 @@
 // =====================================================
 //  Dashboard Deteksi Helm / APD  -  app.js
-//  Model ONNX berjalan di browser. Fitur:
+//  Model ONNX berjalan di browser (hanya halaman Monitoring Live). Fitur:
 //  - Webcam / kamera HP real-time + FPS + slider confidence
 //  - Penanganan error kamera dan model
 //  - Hitung pelanggar SEKALI per orang (tracking ID)
@@ -8,98 +8,11 @@
 //  - Pilihan model v1 / v2 (menu di atas video)
 // =====================================================
 
-// ---------- Tab (navigasi) ----------
-const tombol = document.querySelectorAll('nav button');
-const tab = document.querySelectorAll('.tab');
-
-function bukaTab(nama) {
-  tab.forEach(t => t.classList.toggle('active', t.id === nama));
-  tombol.forEach(b => b.classList.toggle('active', b.dataset.tab === nama));
-}
-tombol.forEach(b => b.addEventListener('click', () => bukaTab(b.dataset.tab)));
-bukaTab('live');
-
 // ---------- Membaca file JSON ----------
 async function muatJSON(path) {
   const respon = await fetch(path);
   return await respon.json();
 }
-
-function kartu(label, angka, warna = '') {
-  return `<div class="kartu">
-            <div class="label">${label}</div>
-            <div class="angka ${warna}">${angka}</div>
-          </div>`;
-}
-
-// ---------- Tab Dataset ----------
-async function isiDataset() {
-  const d = await muatJSON('data/dataset.json');
-  document.getElementById('dataset').innerHTML = `
-    <h2>Ringkasan Dataset (dari Dataset Engineer)</h2>
-    <div class="kartu-grid">
-      ${kartu('Total gambar', d.total_gambar)}
-      ${kartu('Data train', d.pembagian.train)}
-      ${kartu('Data val', d.pembagian.val)}
-      ${kartu('Data test', d.pembagian.test)}
-      ${kartu('Label helmet', d.label_per_kelas.helmet, 'hijau')}
-      ${kartu('Label no_helmet', d.label_per_kelas.no_helmet, 'merah')}
-    </div>
-    <p style="color:#94a3b8;font-size:13px">Sumber: ${d.sumber} · Diperbarui: ${d.diperbarui}</p>`;
-}
-isiDataset();
-
-// ---------- Tab Performa Model ----------
-async function isiModel() {
-  const m = await muatJSON('data/metrics.json');
-  const persen = x => (x * 100).toFixed(1) + '%';
-  const lab = m.confusion_matrix.labels;
-  const v = m.confusion_matrix.nilai;
-
-  document.getElementById('model').innerHTML = `
-    <h2>Performa Model (dari Data Scientist) · ${m.model}</h2>
-    <div class="kartu-grid">
-      ${kartu('Precision', persen(m.precision))}
-      ${kartu('Recall', persen(m.recall))}
-      ${kartu('mAP@50', persen(m.map50), 'hijau')}
-    </div>
-    <div class="dua-kolom">
-      <div class="chart-box"><canvas id="grafikKelas"></canvas></div>
-      <div class="chart-box">
-        <h2>Confusion Matrix</h2>
-        <table class="cm">
-          <tr><th></th><th>Prediksi: ${lab[0]}</th><th>Prediksi: ${lab[1]}</th></tr>
-          <tr><th>Asli: ${lab[0]}</th><td class="benar">${v[0][0]}</td><td class="salah">${v[0][1]}</td></tr>
-          <tr><th>Asli: ${lab[1]}</th><td class="salah">${v[1][0]}</td><td class="benar">${v[1][1]}</td></tr>
-        </table>
-      </div>
-    </div>`;
-
-  const kelas = Object.keys(m.per_kelas);
-  const nilai = Object.values(m.per_kelas);
-  new Chart(document.getElementById('grafikKelas'), {
-    type: 'bar',
-    data: {
-      labels: kelas,
-      datasets: [
-        { label: 'Precision', data: nilai.map(k => k.precision * 100), backgroundColor: '#38bdf8' },
-        { label: 'Recall',    data: nilai.map(k => k.recall * 100),    backgroundColor: '#22c55e' }
-      ]
-    },
-    options: {
-      maintainAspectRatio: false,
-      scales: {
-        y: { min: 0, max: 100, ticks: { color: '#94a3b8' } },
-        x: { ticks: { color: '#94a3b8' } }
-      },
-      plugins: {
-        legend: { labels: { color: '#e2e8f0' } },
-        title: { display: true, text: 'Precision dan Recall per Kelas (%)', color: '#e2e8f0' }
-      }
-    }
-  });
-}
-isiModel();
 
 // =====================================================
 //  Tab Monitoring Live
@@ -129,14 +42,19 @@ const modelSekarang = () => daftarModel[indeksModel];
 
 // ---------- Pengaturan deteksi ----------
 let batasYakin = 0.5;                  // diatur lewat slider
-const BATAS_IOU = 0.5;                 // membuang kotak ganda
+const BATAS_IOU = 0.45;                // kotak yang tumpang tindih lebih dari ini dianggap ganda
+const BATAS_TUMPANG = 0.7;             // kotak kecil yang 70% berada di dalam kotak lain dianggap ganda
 const MAKS_LEBAR_KOTAK = 1.0;          // 1.0 = nonaktif. Isi 0.35 untuk mengabaikan kepala yang terlalu dekat
 
 // ---------- Pengaturan pelacakan (tracking) ----------
-const IOU_PASANG = 0.2;                // kemiripan minimum agar kotak dianggap orang yang sama
-const MAKS_HILANG = 8;                 // jumlah deteksi tanpa terlihat sebelum ID dibuang
-const FRAME_KONFIRMASI = 3;            // ID baru dihitung setelah terlihat minimal sekian kali
+const BATAS_RENDAH = 0.25;             // tebakan di bawah slider tapi di atas ini HANYA dipakai untuk melanjutkan ID yang sudah ada
+const IOU_PASANG = 0.15;               // kemiripan minimum antara posisi perkiraan dan deteksi baru
+const JARAK_PASANG = 2.5;              // orang yang bergeser sejauh ini (x ukuran kotak) tetap dianggap orang yang sama
+const MAKS_HILANG_DETIK = 3;           // ID dibuang bila tidak terlihat selama sekian detik
+const FRAME_KONFIRMASI = 4;            // ID baru dihitung setelah terlihat minimal sekian kali
 const RIWAYAT_KELAS = 7;               // kelas ditentukan dari suara terbanyak beberapa deteksi terakhir
+const HALUS_POSISI = 0.7;              // 1 = ikut deteksi baru sepenuhnya, makin kecil makin halus
+const REDAM_KECEPATAN = 0.3;           // 0 = kecepatan hanya dari gerakan terakhir, makin besar makin stabil
 
 let sesiModel = null, sedangMuat = false, sedangProses = false;
 let deteksiModel = [];
@@ -215,11 +133,19 @@ function iou(a, b) {
   return inter / (a.w * a.h + b.w * b.h - inter + 1e-9);
 }
 
-function nms(kotak) {
+function tumpangTindih(a, b) {                     // seberapa besar kotak kecil berada di dalam kotak lain
+  const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y);
+  const x2 = Math.min(a.x + a.w, b.x + b.w), y2 = Math.min(a.y + a.h, b.y + b.h);
+  const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  return inter / (Math.min(a.w * a.h, b.w * b.h) + 1e-9);
+}
+
+function nms(kotak) {                              // 1 kepala = 1 kotak, apa pun kelasnya
   kotak.sort((a, b) => b.conf - a.conf);
   const hasil = [];
   for (const k of kotak) {
-    if (hasil.every(h => h.cls !== k.cls || iou(h, k) < BATAS_IOU)) hasil.push(k);
+    const ganda = hasil.some(h => iou(h, k) >= BATAS_IOU || tumpangTindih(h, k) >= BATAS_TUMPANG);
+    if (!ganda) hasil.push(k);
   }
   return hasil;
 }
@@ -227,6 +153,8 @@ function nms(kotak) {
 function saring(kotak) {
   return kotak.filter(k => k.cls && k.w <= MAKS_LEBAR_KOTAK);
 }
+
+const ambangDeteksi = () => Math.min(batasYakin, BATAS_RENDAH);
 
 function bacaKeluaran(out, skala, padX, padY, vw, vh, namaKelas) {
   const d = out.data, dim = out.dims;
@@ -241,8 +169,8 @@ function bacaKeluaran(out, skala, padX, padY, vw, vh, namaKelas) {
   if (dim[2] === 6) {                              // format end-to-end: [1, jumlah, 6]
     for (let i = 0; i < dim[1]; i++) {
       const o = i * 6, skor = d[o + 4];
-      if (skor < batasYakin) continue;
-      kotak.push({ cls: namaKelas[Math.round(d[o + 5])], conf: skor,
+      if (skor < ambangDeteksi()) continue;
+      kotak.push({ cls: namaKelas[Math.round(d[o + 5])], conf: skor, rendah: skor < batasYakin,
                    ...ke01(d[o], d[o + 1], d[o + 2], d[o + 3]) });
     }
     return saring(kotak);
@@ -255,52 +183,96 @@ function bacaKeluaran(out, skala, padX, padY, vw, vh, namaKelas) {
       const s = d[(4 + c) * n + i];
       if (s > skor) { skor = s; terbaik = c; }
     }
-    if (skor < batasYakin) continue;
+    if (skor < ambangDeteksi()) continue;
     const cx = d[i], cy = d[n + i], w = d[2 * n + i], h = d[3 * n + i];
-    kotak.push({ cls: namaKelas[terbaik], conf: skor,
+    kotak.push({ cls: namaKelas[terbaik], conf: skor, rendah: skor < batasYakin,
                  ...ke01(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2) });
   }
   return saring(nms(kotak));
 }
 
 // ---------- Pelacakan: memberi ID pada tiap orang ----------
-function lacak(dets) {
+// Cara kerja ringkas (terinspirasi ByteTrack):
+// 1. Tiap orang punya posisi dan KECEPATAN. Posisi diperkirakan maju sesuai waktu yang berlalu.
+// 2. Tahap 1: deteksi yakin dipasangkan ke perkiraan posisi. Yang tidak cocok = orang baru.
+// 3. Tahap 2: deteksi kurang yakin hanya boleh melanjutkan ID lama (tidak boleh membuat ID baru).
+// 4. ID yang menghilang ditahan beberapa detik, sehingga orang yang tertutup sebentar tidak dihitung ganda.
+function perkiraan(t, tSekarang) {
+  const dt = Math.min((tSekarang - t.waktu) / 1000, 1.0);
+  return { x: t.x + t.vx * dt, y: t.y + t.vy * dt, w: t.w, h: t.h };
+}
+
+function kecocokan(p, d) {                         // 0 = tidak cocok, makin besar makin cocok
+  const v = iou(p, d);
+  const jarak = Math.hypot((p.x + p.w / 2) - (d.x + d.w / 2), (p.y + p.h / 2) - (d.y + d.h / 2));
+  const batas = JARAK_PASANG * Math.max(p.w, p.h, d.w, d.h);
+  if (v < IOU_PASANG && jarak > batas) return 0;
+  return v + (1 - Math.min(jarak / batas, 1)) * 0.5 + 0.01;
+}
+
+function perbaruiTrek(t, d, tSekarang) {
+  const dt = Math.max((tSekarang - t.waktu) / 1000, 0.05);
+  const batasV = 2;                                // batas kecepatan wajar (layar per detik)
+  const vx = Math.max(-batasV, Math.min(batasV, (d.x - t.x) / dt));
+  const vy = Math.max(-batasV, Math.min(batasV, (d.y - t.y) / dt));
+  t.vx = REDAM_KECEPATAN * t.vx + (1 - REDAM_KECEPATAN) * vx;
+  t.vy = REDAM_KECEPATAN * t.vy + (1 - REDAM_KECEPATAN) * vy;
+  t.x = t.x * (1 - HALUS_POSISI) + d.x * HALUS_POSISI;
+  t.y = t.y * (1 - HALUS_POSISI) + d.y * HALUS_POSISI;
+  t.w = t.w * (1 - HALUS_POSISI) + d.w * HALUS_POSISI;
+  t.h = t.h * (1 - HALUS_POSISI) + d.h * HALUS_POSISI;
+  t.waktu = tSekarang;
+  t.umur++;
+  t.riwayat.push(d.cls);
+  if (t.riwayat.length > RIWAYAT_KELAS) t.riwayat.shift();
+  d.track = t;
+}
+
+function pasangkan(daftarTrek, dets, tPakai, dPakai, tSekarang) {
   const pasangan = [];
-  for (const t of trek) for (const d of dets) {
-    const v = iou(t, d);
-    if (v >= IOU_PASANG) pasangan.push({ t, d, v });
+  for (const t of daftarTrek) {
+    const p = perkiraan(t, tSekarang);
+    for (const d of dets) {
+      const v = kecocokan(p, d);
+      if (v > 0) pasangan.push({ t, d, v });
+    }
   }
   pasangan.sort((a, b) => b.v - a.v);
+  for (const q of pasangan) {
+    if (tPakai.has(q.t) || dPakai.has(q.d)) continue;
+    tPakai.add(q.t);  dPakai.add(q.d);
+    perbaruiTrek(q.t, q.d, tSekarang);
+  }
+}
+
+function lacak(dets, tSekarang) {
+  const yakin = dets.filter(d => !d.rendah);
+  const ragu = dets.filter(d => d.rendah);
   const tPakai = new Set(), dPakai = new Set();
 
-  for (const p of pasangan) {                      // pasangkan deteksi ke ID lama (kemiripan tertinggi dulu)
-    if (tPakai.has(p.t) || dPakai.has(p.d)) continue;
-    tPakai.add(p.t);  dPakai.add(p.d);
-    Object.assign(p.t, { x: p.d.x, y: p.d.y, w: p.d.w, h: p.d.h, hilang: 0 });
-    p.t.umur++;
-    p.t.riwayat.push(p.d.cls);
-    if (p.t.riwayat.length > RIWAYAT_KELAS) p.t.riwayat.shift();
-    p.d.track = p.t;
-  }
-  for (const t of trek) if (!tPakai.has(t)) t.hilang++;
+  pasangkan(trek, yakin, tPakai, dPakai, tSekarang);                       // tahap 1
+  pasangkan(trek.filter(t => !tPakai.has(t)), ragu, tPakai, dPakai, tSekarang);   // tahap 2
 
-  for (const d of dets) {                          // deteksi tanpa pasangan = orang baru
+  for (const d of yakin) {                         // deteksi yakin tanpa pasangan = orang baru
     if (dPakai.has(d)) continue;
-    const t = { id: idBerikut++, x: d.x, y: d.y, w: d.w, h: d.h, umur: 1, hilang: 0, riwayat: [d.cls] };
+    const t = { id: idBerikut++, x: d.x, y: d.y, w: d.w, h: d.h, vx: 0, vy: 0,
+                waktu: tSekarang, umur: 1, riwayat: [d.cls] };
     trek.push(t);
     d.track = t;
   }
-  trek = trek.filter(t => t.hilang <= MAKS_HILANG);
+  trek = trek.filter(t => tSekarang - t.waktu <= MAKS_HILANG_DETIK * 1000);
 
-  for (const d of dets) {                          // kelas stabil = suara terbanyak
-    const r = d.track.riwayat;
+  const hasil = [];
+  for (const d of dets) {
+    if (!d.track) continue;                        // deteksi ragu tanpa ID lama: diabaikan
+    const t = d.track;
+    const r = t.riwayat;
     const tanpa = r.filter(c => c === 'no_helmet').length;
-    d.cls = tanpa > r.length - tanpa ? 'no_helmet' : 'helmet';
-    d.id = d.track.id;
-    d.pasti = d.track.umur >= FRAME_KONFIRMASI;
-    delete d.track;
+    hasil.push({ cls: tanpa > r.length - tanpa ? 'no_helmet' : 'helmet',
+                 conf: d.conf, id: t.id, pasti: t.umur >= FRAME_KONFIRMASI,
+                 x: t.x, y: t.y, w: t.w, h: t.h });
   }
-  return dets;
+  return hasil;
 }
 
 // ---------- Hitung orang unik (setiap orang hanya sekali) ----------
@@ -342,7 +314,7 @@ async function jalankanModelLokal() {
     const hasil = await sesiModel.run({ [sesiModel.inputNames[0]]: tensor });
     const out = hasil[sesiModel.outputNames[0]];
     const mentah = bacaKeluaran(out, skala, padX, padY, v.videoWidth, v.videoHeight, m.kelas);
-    deteksiModel = lacak(mentah);
+    deteksiModel = lacak(mentah, performance.now());
 
     const sekarang = performance.now();
     msTerakhir = sekarang - mulai;
