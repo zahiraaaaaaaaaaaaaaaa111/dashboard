@@ -5,7 +5,7 @@
 //  - Penanganan error kamera dan model
 //  - Hitung pelanggar SEKALI per orang (tracking ID)
 //  - Upload video sebagai cadangan
-//  - Pilihan model v1 / v2
+//  - Pilihan model v1 / v2 (menu di atas video)
 // =====================================================
 
 // ---------- Tab (navigasi) ----------
@@ -115,12 +115,14 @@ const daftarVideo = [
   { nama: 'Video 4 - dummy_04', file: 'data/detections_04.json' }
 ];
 
-// ---------- DAFTAR MODEL (v1 sekarang, v2 nanti) ----------
-// Saat v2 siap: taruh file di folder onnx, lalu hilangkan tanda // di baris v2.
-// Naikkan angka "versi" setiap mengganti isi file dengan nama yang sama (supaya cache HP diperbarui).
+// ---------- DAFTAR MODEL (v1 dan v2) ----------
+// Model baru: taruh file .onnx di folder onnx, lalu tambah satu baris di daftar ini.
+// - ukuran : harus sama dengan imgsz saat export (yolo export ... imgsz=416)
+// - kelas  : urutan harus sama dengan model.names (0 = helmet, 1 = no_helmet)
+// - versi  : NAIKKAN angkanya bila isi file diganti dengan nama yang sama (supaya cache HP diperbarui)
 const daftarModel = [
-  { nama: 'Model v1', file: 'onnx/best.onnx', versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] }
-  // { nama: 'Model v2', file: 'onnx/best_v2.onnx', versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] }
+  { nama: 'Model v1', file: 'onnx/best.onnx',    versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] },
+  { nama: 'Model v2', file: 'onnx/best_v2.onnx', versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] }
 ];
 let indeksModel = 0;
 const modelSekarang = () => daftarModel[indeksModel];
