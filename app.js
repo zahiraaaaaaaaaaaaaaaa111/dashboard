@@ -5,7 +5,7 @@
 //  - Penanganan error kamera dan model
 //  - Hitung pelanggar SEKALI per orang (tracking ID)
 //  - Upload video sebagai cadangan
-//  - Pilihan model v1 / v2 (menu di atas video)
+//  - Pilihan model v1 / v2 / v3 (menu di atas video)
 // =====================================================
 
 // ---------- Membaca file JSON ----------
@@ -28,14 +28,18 @@ const daftarVideo = [
   { nama: 'Video 4 - dummy_04', file: 'data/detections_04.json' }
 ];
 
-// ---------- DAFTAR MODEL (v1 dan v2) ----------
+// ---------- DAFTAR MODEL (v3, v2, v1) ----------
 // Model baru: taruh file .onnx di folder onnx, lalu tambah satu baris di daftar ini.
-// - ukuran : harus sama dengan imgsz saat export (yolo export ... imgsz=416)
+// Model PERTAMA di daftar = pilihan awal saat halaman dibuka.
+// - ukuran : harus sama dengan imgsz saat export (yolo export ... imgsz=640)
 // - kelas  : urutan harus sama dengan model.names (0 = helmet, 1 = no_helmet)
 // - versi  : NAIKKAN angkanya bila isi file diganti dengan nama yang sama (supaya cache HP diperbarui)
+// Hapus baris yang file-nya belum ada di folder onnx.
 const daftarModel = [
-  { nama: 'Model v1', file: 'onnx/best.onnx',    versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] },
-  { nama: 'Model v2', file: 'onnx/best_v2.onnx', versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] }
+  { nama: 'Model v3 (akurat 640)', file: 'onnx/best_v3_640.onnx', versi: 1, ukuran: 640, kelas: ['helmet', 'no_helmet'] },
+  { nama: 'Model v3 (cepat 416)',  file: 'onnx/best_v3_416.onnx', versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] },
+  { nama: 'Model v2',              file: 'onnx/best_v2.onnx',     versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] },
+  { nama: 'Model v1 (cadangan)',   file: 'onnx/best.onnx',        versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] }
 ];
 let indeksModel = 0;
 const modelSekarang = () => daftarModel[indeksModel];
@@ -610,7 +614,7 @@ async function isiLive() {
     if (modelAktif()) muatModel();
   });
 
-  // Pilihan model v1 / v2
+  // Pilihan model (v3 / v2 / v1)
   document.getElementById('pilihModel').addEventListener('change', (e) => {
     indeksModel = parseInt(e.target.value, 10);
     sesiModel = null;
