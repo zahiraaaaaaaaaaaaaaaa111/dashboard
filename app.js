@@ -468,7 +468,7 @@ function susunKalimat(r) {
   k += 'dashboard mendeteksi ' + r.total + ' orang dari sumber "' + r.sumber + '". ';
   if (r.pel) {
     k += r.pel + ' orang tidak memakai helm (' + r.daftarPelanggar.join(', ') + (r.pel > 6 ? ', dan lainnya' : '') + ') dan ' +
-         r.patuh + ' orang patuh, sehingga kepatuhan per orang ' + r.kep + '% (ambang ' + r.ambang + '%). ';
+         r.patuh + ' orang patuh, sehingga kepatuhan per orang ' + r.kep + '% (target minimal ' + r.ambang + '%). ';
     k += 'Pelanggaran pertama: ' + r.pertama + '. ';
   } else {
     k += 'Semua orang memakai helm (kepatuhan 100%), tidak ada pelanggaran tercatat. ';
@@ -486,7 +486,7 @@ function teksLengkap(r) {
     'Total orang terdeteksi: ' + r.total,
     'Pelanggar             : ' + r.pel,
     'Patuh                 : ' + r.patuh,
-    'Kepatuhan per orang   : ' + (r.kep === null ? '-' : r.kep + '% (ambang ' + r.ambang + '%)'),
+    'Kepatuhan per orang   : ' + (r.kep === null ? '-' : r.kep + '% (target minimal ' + r.ambang + '%)'),
     'Status                : ' + r.status,
     'Pelanggaran pertama   : ' + r.pertama,
     'Pelanggaran terakhir  : ' + r.terakhir,
