@@ -125,3 +125,35 @@ table.cm th, table.cm td {
   border-radius: 8px; padding: 8px 16px; cursor: pointer; font-size: 14px;
 }
 .panel-model button:hover { background: #475569; }
+
+.riwayat { margin-top: 12px; }
+.riwayat .judul { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.riwayat button {
+  background: #334155; color: #e2e8f0; border: none;
+  border-radius: 8px; padding: 8px 16px; cursor: pointer; font-size: 14px;
+}
+.riwayat button:hover { background: #475569; }
+.gulir { max-height: 320px; overflow: auto; }
+.tabel-riwayat { width: 100%; border-collapse: collapse; font-size: 14px; }
+.tabel-riwayat th, .tabel-riwayat td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #334155; }
+.tabel-riwayat th { color: #94a3b8; font-weight: 600; position: sticky; top: 0; background: #0f172a; }
+.tabel-riwayat img { width: 48px; height: 48px; border-radius: 6px; object-fit: cover; display: block; }
+.badge-orang { background: #7f1d1d; color: #fecaca; border-radius: 6px; padding: 2px 8px; font-weight: 700; }
+
+.ringkasan { margin-top: 12px; }
+.ringkasan .judul { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.ringkasan .aksi { display: flex; align-items: center; gap: 10px; }
+.ringkasan button {
+  background: #334155; color: #e2e8f0; border: none;
+  border-radius: 8px; padding: 8px 16px; cursor: pointer; font-size: 14px;
+}
+.ringkasan button:hover { background: #475569; }
+.status-besar { padding: 8px 18px; border-radius: 999px; font-weight: 800; font-size: 18px; color: #0f172a; background: #94a3b8; }
+.kalimat { background: #1e293b; border-left: 4px solid #38bdf8; padding: 10px 14px; border-radius: 8px; line-height: 1.6; margin: 8px 0 12px; }
+.ringkasan h3 { font-size: 14px; color: #38bdf8; margin: 14px 0 8px; }
+.grid-ringkas { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+.mini { background: #1e293b; border-radius: 8px; padding: 10px 12px; }
+.mini .label { color: #94a3b8; font-size: 12px; }
+.mini .nilai { font-size: 15px; font-weight: 700; margin-top: 4px; word-break: break-word; }
+.ringkasan .chart-box { background: #1e293b; }
+.chart-box.kecil { height: 220px; margin-top: 12px; }

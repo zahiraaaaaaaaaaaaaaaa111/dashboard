@@ -5,7 +5,10 @@
 //  - Penanganan error kamera dan model
 //  - Hitung pelanggar SEKALI per orang (tracking ID)
 //  - Upload video sebagai cadangan
-//  - Pilihan model v1 / v2 / v3 (menu di atas video)
+//  - Riwayat pelanggaran (Orang#ID, foto, jam, sumber) + unduh CSV
+//  - Ringkasan sesi: tanggal/jam, status AMAN/WASPADA/BAHAYA, kalimat otomatis,
+//    waktu pelanggaran + grafik, kinerja aplikasi, tombol salin untuk slide
+//  - Pilihan model v1 / v2 (menu di atas video)
 // =====================================================
 
 // ---------- Membaca file JSON ----------
@@ -28,18 +31,19 @@ const daftarVideo = [
   { nama: 'Video 4 - dummy_04', file: 'data/detections_04.json' }
 ];
 
-// ---------- DAFTAR MODEL (v3, v2, v1) ----------
+// ---------- DAFTAR MODEL (v2 dan v1) ----------
 // Model baru: taruh file .onnx di folder onnx, lalu tambah satu baris di daftar ini.
 // Model PERTAMA di daftar = pilihan awal saat halaman dibuka.
-// - ukuran : harus sama dengan imgsz saat export (yolo export ... imgsz=640)
+// - ukuran : harus sama dengan imgsz saat export (yolo export ... imgsz=416)
 // - kelas  : urutan harus sama dengan model.names (0 = helmet, 1 = no_helmet)
 // - versi  : NAIKKAN angkanya bila isi file diganti dengan nama yang sama (supaya cache HP diperbarui)
 // Hapus baris yang file-nya belum ada di folder onnx.
+// (Untuk memasang v3 lagi nanti: taruh best_v3_640.onnx / best_v3_416.onnx di folder onnx,
+//  lalu tambahkan barisnya di sini, misalnya:
+//  { nama: 'Model v3 (akurat 640)', file: 'onnx/best_v3_640.onnx', versi: 1, ukuran: 640, kelas: ['helmet', 'no_helmet'] },)
 const daftarModel = [
-  { nama: 'Model v3 (akurat 640)', file: 'onnx/best_v3_640.onnx', versi: 1, ukuran: 640, kelas: ['helmet', 'no_helmet'] },
-  { nama: 'Model v3 (cepat 416)',  file: 'onnx/best_v3_416.onnx', versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] },
-  { nama: 'Model v2',              file: 'onnx/best_v2.onnx',     versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] },
-  { nama: 'Model v1 (cadangan)',   file: 'onnx/best.onnx',        versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] }
+  { nama: 'Model v2',            file: 'onnx/best_v2.onnx', versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] },
+  { nama: 'Model v1 (cadangan)', file: 'onnx/best.onnx',    versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] }
 ];
 let indeksModel = 0;
 const modelSekarang = () => daftarModel[indeksModel];
@@ -69,6 +73,18 @@ let waktuSelesai = [], msTerakhir = 0, daftarMs = [];
 
 let trek = [], idBerikut = 1;
 let orangUnik = new Set(), pelanggarUnik = new Set();
+
+// ---------- Riwayat pelanggaran ----------
+const SIMPAN_FOTO = true;              // simpan foto kecil sebagai bukti tiap pelanggaran
+const MAKS_RIWAYAT = 300;              // batas jumlah catatan di layar
+let riwayat = [], nomorRiwayat = 0;
+let namaUpload = '';
+
+// ---------- Statistik sesi (untuk ringkasan) ----------
+const AMBANG_WASPADA = 20;             // status WASPADA bila kepatuhan di bawah ambang tetapi masih dalam selisih ini (poin %)
+let sesiMulai = null, sesiAkhir = null, durasiMs = 0, tPutaranTerakhir = performance.now();
+let fpsJumlah = 0, fpsHitung = 0, msJumlah = 0, msHitung = 0, confJumlah = 0, confHitung = 0;
+let grafikBucket = null, kunciBucket = '';
 
 const bufferCanvas = document.createElement('canvas');
 const bufferCtx = bufferCanvas.getContext('2d', { willReadFrequently: true });
@@ -284,7 +300,247 @@ function catatUnik(dets) {
   for (const d of dets) {
     if (!d.pasti) continue;
     orangUnik.add(d.id);
-    if (d.cls === 'no_helmet') pelanggarUnik.add(d.id);
+    if (d.cls === 'no_helmet' && !pelanggarUnik.has(d.id)) {
+      pelanggarUnik.add(d.id);
+      catatPelanggaran(d);                         // orang ini baru pertama kali tercatat melanggar
+    }
+  }
+}
+
+// ---------- Riwayat pelanggaran: pencatatan dan tampilan ----------
+const dua = n => String(n).padStart(2, '0');
+const formatJam = t => dua(t.getHours()) + ':' + dua(t.getMinutes()) + ':' + dua(t.getSeconds());
+const formatTanggal = t => t.getFullYear() + '-' + dua(t.getMonth() + 1) + '-' + dua(t.getDate());
+const formatMenit = detik => dua(Math.floor(detik / 60)) + ':' + dua(Math.floor(detik % 60));
+const esc = x => String(x).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function namaSumber() {
+  if (kameraStream) return 'Kamera live';
+  if (terakhirSumber === 'upload') return 'Upload: ' + (namaUpload || 'video');
+  const sel = document.getElementById('pilihVideo');
+  return sel && sel.selectedOptions[0] ? sel.selectedOptions[0].text : '-';
+}
+
+function ambilFoto(d) {                            // potongan kecil frame di sekitar orang tersebut
+  try {
+    const v = document.getElementById('video');
+    const vw = v.videoWidth, vh = v.videoHeight;
+    const cx = (d.x + d.w / 2) * vw, cy = (d.y + d.h / 2) * vh;
+    const sisi = Math.min(Math.max(d.w * vw, d.h * vh) * 2.5, vw, vh);
+    const sx = Math.max(0, Math.min(cx - sisi / 2, vw - sisi));
+    const sy = Math.max(0, Math.min(cy - sisi / 2, vh - sisi));
+    const c = document.createElement('canvas');
+    c.width = 96;  c.height = 96;
+    c.getContext('2d').drawImage(v, sx, sy, sisi, sisi, 0, 0, 96, 96);
+    return c.toDataURL('image/jpeg', 0.7);
+  } catch (e) {
+    return '';
+  }
+}
+
+function catatPelanggaran(d) {
+  const v = document.getElementById('video');
+  const sekarang = new Date();
+  riwayat.push({
+    no: ++nomorRiwayat,
+    id: d.id,
+    tanggal: formatTanggal(sekarang),
+    jam: formatJam(sekarang),
+    posisi: formatMenit(v ? v.currentTime : 0),
+    sumber: namaSumber(),
+    model: modelAktif() ? modelSekarang().nama : 'Dummy (keyframe)',
+    detikSesi: durasiMs / 1000,
+    conf: d.conf,
+    foto: SIMPAN_FOTO ? ambilFoto(d) : ''
+  });
+  if (riwayat.length > MAKS_RIWAYAT) riwayat.shift();
+  gambarRiwayat();
+  perbaruiRingkasan();
+}
+
+function gambarRiwayat() {
+  const tb = document.getElementById('isiRiwayat');
+  if (!tb) return;
+  document.getElementById('kosongRiwayat').style.display = riwayat.length ? 'none' : 'block';
+  document.getElementById('jumlahRiwayat').textContent = riwayat.length;
+  tb.innerHTML = riwayat.slice().reverse().map(r => `
+    <tr>
+      <td>${r.no}</td>
+      <td>${r.foto ? '<img src="' + r.foto + '" alt="Orang#' + r.id + '">' : '-'}</td>
+      <td><span class="badge-orang">Orang#${r.id}</span></td>
+      <td>${r.jam}</td>
+      <td>${r.posisi}</td>
+      <td>${esc(r.sumber)}</td>
+      <td>${esc(r.model)}</td>
+      <td>${r.conf.toFixed(2)}</td>
+    </tr>`).join('');
+}
+
+function unduhCSV() {
+  if (!riwayat.length) { tampilkanError('Belum ada pelanggaran yang bisa diunduh.'); return; }
+  const kutip = x => '"' + String(x).replace(/"/g, '""') + '"';
+  const kepala = ['No', 'Orang', 'Tanggal', 'Jam', 'Posisi video', 'Sumber', 'Model', 'Keyakinan'];
+  const baris = riwayat.map(r => [r.no, 'Orang#' + r.id, r.tanggal, r.jam, r.posisi,
+                                  r.sumber, r.model, r.conf.toFixed(2)].map(kutip).join(','));
+  const isi = '\ufeff' + [kepala.map(kutip).join(','), ...baris].join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([isi], { type: 'text/csv;charset=utf-8' }));
+  a.download = 'riwayat_pelanggaran.csv';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ---------- Ringkasan sesi ----------
+const ZONA = () => (new Date().getTimezoneOffset() === -420 ? ' WIB' : '');
+const tanggalPanjang = t => t.toLocaleDateString('id-ID',
+  { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+
+const KELOMPOK_RINGKAS = [
+  ['Tanggal dan Waktu', [['rkTanggal', 'Tanggal'], ['rkMulai', 'Mulai pemantauan'],
+                         ['rkSelesai', 'Terakhir aktif'], ['rkDurasi', 'Durasi pemantauan']]],
+  ['Orang dan Kepatuhan', [['rkTotal', 'Total orang terdeteksi'], ['rkPelanggar', 'Pelanggar (tanpa helm)'],
+                           ['rkPatuh', 'Patuh (berhelm)'], ['rkKepatuhan', 'Kepatuhan per orang']]],
+  ['Waktu Pelanggaran', [['rkPertama', 'Pelanggaran pertama'], ['rkTerakhir', 'Pelanggaran terakhir'],
+                         ['rkTersibuk', 'Periode tersibuk']]],
+  ['Kinerja Aplikasi', [['rkSumber', 'Sumber video'], ['rkModel', 'Model deteksi'], ['rkResolusi', 'Resolusi video'],
+                        ['rkFps', 'Rata-rata FPS'], ['rkMs', 'Rata-rata latensi'],
+                        ['rkConf', 'Rata-rata keyakinan'], ['rkJumlahDeteksi', 'Frame diproses']]]
+];
+
+function ringkasanHTML() {
+  return KELOMPOK_RINGKAS.map(([judul, item]) => `
+    <h3>${judul}</h3>
+    <div class="grid-ringkas">${item.map(([id, label]) =>
+      `<div class="mini"><div class="label">${label}</div><div class="nilai" id="${id}">-</div></div>`).join('')}</div>`
+  ).join('');
+}
+
+function kelompokPelanggaran() {                   // pelanggar baru per 10 detik (sesi pendek) atau per menit
+  const total = durasiMs / 1000;
+  const lebar = total < 180 ? 10 : 60;
+  const maksR = riwayat.reduce((m, r) => Math.max(m, r.detikSesi), 0);
+  const jumlah = Math.max(1, Math.ceil(Math.max(total, maksR) / lebar));
+  const isi = new Array(jumlah).fill(0);
+  for (const r of riwayat) isi[Math.min(Math.floor(r.detikSesi / lebar), jumlah - 1)]++;
+  const label = isi.map((_, i) => formatMenit(i * lebar));
+  let puncak = '-', maks = 0;
+  isi.forEach((n, i) => {
+    if (n > maks) { maks = n; puncak = formatMenit(i * lebar) + '–' + formatMenit((i + 1) * lebar) + ' (' + n + ' pelanggar)'; }
+  });
+  return { lebar, isi, label, puncak };
+}
+
+function hitungRingkasan() {
+  const total = orangUnik.size, pel = pelanggarUnik.size, patuh = total - pel;
+  const ambang = (dataLive && dataLive.ambang_kepatuhan) || 80;
+  const kep = total ? Math.round(patuh / total * 100) : null;
+  let status = 'MENUNGGU DATA', warna = '#94a3b8';
+  if (total) {
+    if (kep >= ambang) { status = 'AMAN'; warna = '#22c55e'; }
+    else if (kep >= ambang - AMBANG_WASPADA) { status = 'WASPADA'; warna = '#f59e0b'; }
+    else { status = 'BAHAYA'; warna = '#ef4444'; }
+  }
+  const v = document.getElementById('video');
+  const kel = kelompokPelanggaran();
+  const detail = r => r ? 'Orang#' + r.id + ' pada ' + formatMenit(r.detikSesi) + ' (jam ' + r.jam + ')' : '-';
+  return {
+    total, pel, patuh, ambang, kep, status, warna, kel,
+    durasi: Math.floor(durasiMs / 1000),
+    tanggal: sesiMulai ? tanggalPanjang(sesiMulai) : '-',
+    mulai: sesiMulai ? formatJam(sesiMulai) + ZONA() : '-',
+    selesai: sesiAkhir ? formatJam(sesiAkhir) + ZONA() : '-',
+    pertama: detail(riwayat[0]), terakhir: detail(riwayat[riwayat.length - 1]),
+    tersibuk: kel.puncak,
+    sumber: namaSumber(),
+    model: modelAktif() ? modelSekarang().nama + ' (input ' + modelSekarang().ukuran + ')' : 'Dummy (keyframe)',
+    resolusi: v && v.videoWidth ? v.videoWidth + ' × ' + v.videoHeight : '-',
+    fps: fpsHitung ? (fpsJumlah / fpsHitung).toFixed(1) + ' FPS' : '-',
+    ms: msHitung ? Math.round(msJumlah / msHitung) + ' ms' : '-',
+    conf: confHitung ? (confJumlah / confHitung).toFixed(2) : '-',
+    jumlahDeteksi: msHitung ? msHitung + ' frame' : '-',
+    daftarPelanggar: [...pelanggarUnik].slice(0, 6).map(i => 'Orang#' + i)
+  };
+}
+
+function susunKalimat(r) {
+  if (!r.total) return 'Belum ada orang terdeteksi. Putar video atau aktifkan kamera dengan model deteksi menyala, lalu ringkasan akan tersusun otomatis.';
+  let k = 'Pada ' + r.tanggal + ' pukul ' + r.mulai + '–' + r.selesai + ' (durasi ' + formatMenit(r.durasi) + '), ';
+  k += 'dashboard mendeteksi ' + r.total + ' orang dari sumber "' + r.sumber + '". ';
+  if (r.pel) {
+    k += r.pel + ' orang tidak memakai helm (' + r.daftarPelanggar.join(', ') + (r.pel > 6 ? ', dan lainnya' : '') + ') dan ' +
+         r.patuh + ' orang patuh, sehingga kepatuhan per orang ' + r.kep + '% (ambang ' + r.ambang + '%). ';
+    k += 'Pelanggaran pertama: ' + r.pertama + '. ';
+  } else {
+    k += 'Semua orang memakai helm (kepatuhan 100%), tidak ada pelanggaran tercatat. ';
+  }
+  return k + 'Status keseluruhan: ' + r.status + '.';
+}
+
+function teksLengkap(r) {
+  return [
+    'RINGKASAN SESI PEMANTAUAN APD (HELM)',
+    'Tanggal               : ' + r.tanggal,
+    'Mulai                 : ' + r.mulai,
+    'Terakhir aktif        : ' + r.selesai,
+    'Durasi pemantauan     : ' + formatMenit(r.durasi),
+    'Total orang terdeteksi: ' + r.total,
+    'Pelanggar             : ' + r.pel,
+    'Patuh                 : ' + r.patuh,
+    'Kepatuhan per orang   : ' + (r.kep === null ? '-' : r.kep + '% (ambang ' + r.ambang + '%)'),
+    'Status                : ' + r.status,
+    'Pelanggaran pertama   : ' + r.pertama,
+    'Pelanggaran terakhir  : ' + r.terakhir,
+    'Periode tersibuk      : ' + r.tersibuk,
+    'Sumber video          : ' + r.sumber,
+    'Model deteksi         : ' + r.model,
+    'Resolusi video        : ' + r.resolusi,
+    'Rata-rata FPS         : ' + r.fps,
+    'Rata-rata latensi     : ' + r.ms,
+    'Rata-rata keyakinan   : ' + r.conf,
+    '',
+    susunKalimat(r)
+  ].join('\n');
+}
+
+function perbaruiRingkasan() {
+  const st = document.getElementById('statusSesi');
+  if (!st) return;
+  const r = hitungRingkasan();
+  const set = (id, t) => { const e = document.getElementById(id); if (e) e.textContent = t; };
+  st.textContent = r.status;
+  st.style.background = r.warna;
+  set('kalimatRingkasan', susunKalimat(r));
+  set('rkTanggal', r.tanggal);       set('rkMulai', r.mulai);
+  set('rkSelesai', r.selesai);       set('rkDurasi', r.total || r.durasi ? formatMenit(r.durasi) : '-');
+  set('rkTotal', r.total);           set('rkPelanggar', r.pel);
+  set('rkPatuh', r.patuh);           set('rkKepatuhan', r.kep === null ? '-' : r.kep + '%');
+  set('rkPertama', r.pertama);       set('rkTerakhir', r.terakhir);
+  set('rkTersibuk', r.tersibuk);     set('rkSumber', r.sumber);
+  set('rkModel', r.model);           set('rkResolusi', r.resolusi);
+  set('rkFps', r.fps);               set('rkMs', r.ms);
+  set('rkConf', r.conf);             set('rkJumlahDeteksi', r.jumlahDeteksi);
+  if (grafikBucket) {
+    const kunci = r.kel.lebar + '|' + r.kel.isi.join(',');
+    if (kunci !== kunciBucket) {
+      kunciBucket = kunci;
+      grafikBucket.data.labels = r.kel.label;
+      grafikBucket.data.datasets[0].data = r.kel.isi;
+      grafikBucket.options.plugins.title.text =
+        'Pelanggar baru per ' + (r.kel.lebar === 10 ? '10 detik' : 'menit') + ' (waktu sesi)';
+      grafikBucket.update();
+    }
+  }
+}
+setInterval(perbaruiRingkasan, 1000);
+
+function salinRingkasan() {
+  const teks = teksLengkap(hitungRingkasan());
+  const tombol = document.getElementById('btnSalin');
+  const selesai = () => { tombol.textContent = 'Tersalin!'; setTimeout(() => { tombol.textContent = 'Salin ringkasan'; }, 1500); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(teks).then(selesai).catch(() => tampilkanError('Gagal menyalin. Salin manual dari kartu ringkasan.'));
+  } else {
+    tampilkanError('Browser tidak mendukung salin otomatis. Salin manual dari kartu ringkasan.');
   }
 }
 
@@ -319,9 +575,11 @@ async function jalankanModelLokal() {
     const out = hasil[sesiModel.outputNames[0]];
     const mentah = bacaKeluaran(out, skala, padX, padY, v.videoWidth, v.videoHeight, m.kelas);
     deteksiModel = lacak(mentah, performance.now());
+    for (const dd of deteksiModel) { confJumlah += dd.conf; confHitung++; }
 
     const sekarang = performance.now();
     msTerakhir = sekarang - mulai;
+    msJumlah += msTerakhir;  msHitung++;
     daftarMs.push(msTerakhir);
     if (daftarMs.length > 10) daftarMs.shift();
     waktuSelesai.push(sekarang);
@@ -346,6 +604,7 @@ setInterval(() => {
   const baru = n > 0 && performance.now() - waktuSelesai[n - 1] < 2000;
   if (!modelAktif() || n < 2 || !baru) { el.textContent = 'FPS deteksi: -'; return; }
   const fps = (n - 1) / ((waktuSelesai[n - 1] - waktuSelesai[0]) / 1000);
+  fpsJumlah += fps;  fpsHitung++;
   const rata = daftarMs.reduce((a, b) => a + b, 0) / daftarMs.length;
   el.textContent = 'FPS deteksi: ' + fps.toFixed(1) + ' · rata-rata ' + rata.toFixed(0) + ' ms';
 }, 500);
@@ -417,6 +676,7 @@ function pakaiVideoUpload(file) {
   hentikanKamera();
   if (urlUpload) URL.revokeObjectURL(urlUpload);
   urlUpload = URL.createObjectURL(file);
+  namaUpload = file.name;
   const v = document.getElementById('video');
   v.src = urlUpload;
   v.loop = true;
@@ -432,6 +692,10 @@ function resetHitungan() {
   orangUnik = new Set();  pelanggarUnik = new Set();
   deteksiModel = [];
   waktuSelesai = [];  daftarMs = [];
+  riwayat = [];  nomorRiwayat = 0;  gambarRiwayat();
+  sesiMulai = null;  sesiAkhir = null;  durasiMs = 0;
+  fpsJumlah = 0;  fpsHitung = 0;  msJumlah = 0;  msHitung = 0;  confJumlah = 0;  confHitung = 0;
+  kunciBucket = '';  perbaruiRingkasan();
   if (grafikTren) {
     grafikTren.data.labels = [];  grafikTren.data.datasets[0].data = [];  grafikTren.update();
     grafikDonat.data.datasets[0].data = [0, 0];  grafikDonat.update();
@@ -519,6 +783,13 @@ function perbaruiAngka(dets) {
 
 function putaran() {
   const v = document.getElementById('video');
+  const tNow = performance.now();
+  if (v && v.videoWidth && !v.paused) {            // hitung durasi pemantauan yang benar-benar berjalan
+    if (!sesiMulai) sesiMulai = new Date();
+    durasiMs += Math.min(tNow - tPutaranTerakhir, 250);
+    sesiAkhir = new Date();
+  }
+  tPutaranTerakhir = tNow;
   if (v && v.videoWidth) {
     const dets = ambilDeteksi(v.currentTime);
     gambarKotak(dets);
@@ -576,6 +847,35 @@ async function isiLive() {
         <div class="kartu"><div class="label">Status</div><div class="angka" id="status" style="font-size:16px">Menunggu video...</div></div>
       </div>
     </div>
+    <div class="kartu ringkasan">
+      <div class="judul">
+        <h2>Ringkasan Sesi</h2>
+        <div class="aksi">
+          <span id="statusSesi" class="status-besar">MENUNGGU DATA</span>
+          <button id="btnSalin">Salin ringkasan</button>
+        </div>
+      </div>
+      <p id="kalimatRingkasan" class="kalimat">Belum ada data.</p>
+      ${ringkasanHTML()}
+      <div class="chart-box kecil"><canvas id="cBucket"></canvas></div>
+      <div class="sub">Jumlah orang dihitung dari ID pelacak. Bila orang tertutup atau bergerak cepat, satu orang bisa mendapat dua ID.
+        Ringkasan ikut dikosongkan saat Reset, saat berganti sumber atau model, dan saat video mengulang.</div>
+    </div>
+
+    <div class="kartu riwayat">
+      <div class="judul">
+        <h2>Riwayat Pelanggaran (<span id="jumlahRiwayat">0</span> orang)</h2>
+        <button id="btnCsv">Unduh CSV</button>
+      </div>
+      <div class="gulir">
+        <table class="tabel-riwayat">
+          <thead><tr><th>No</th><th>Foto</th><th>Orang</th><th>Jam</th><th>Posisi video</th><th>Sumber</th><th>Model</th><th>Yakin</th></tr></thead>
+          <tbody id="isiRiwayat"></tbody>
+        </table>
+      </div>
+      <div class="sub" id="kosongRiwayat">Belum ada pelanggaran tercatat. Setiap orang yang terdeteksi tanpa helm dicatat satu kali.</div>
+    </div>
+
     <div class="dua-kolom">
       <div class="chart-box"><canvas id="cTren"></canvas></div>
       <div class="chart-box"><canvas id="cDonat"></canvas></div>
@@ -596,6 +896,15 @@ async function isiLive() {
       plugins: { legend: { labels: { color: '#e2e8f0' } }, title: { display: true, text: 'Orang Unik: Patuh vs Pelanggar', color: '#e2e8f0' } } }
   });
 
+  grafikBucket = new Chart(document.getElementById('cBucket'), {
+    type: 'bar',
+    data: { labels: [], datasets: [{ label: 'Pelanggar baru', data: [], backgroundColor: '#ef4444' }] },
+    options: { maintainAspectRatio: false, animation: false,
+      scales: { y: { min: 0, ticks: { color: '#94a3b8', precision: 0 } }, x: { ticks: { color: '#94a3b8' } } },
+      plugins: { legend: { display: false },
+                 title: { display: true, text: 'Pelanggar baru per 10 detik (waktu sesi)', color: '#e2e8f0' } } }
+  });
+
   const v = document.getElementById('video');
   v.addEventListener('error', () => {
     if (!v.srcObject) tampilkanError('Video tidak bisa diputar. Periksa file video di folder videos atau gunakan format mp4.');
@@ -614,7 +923,7 @@ async function isiLive() {
     if (modelAktif()) muatModel();
   });
 
-  // Pilihan model (v3 / v2 / v1)
+  // Pilihan model (v2 / v1)
   document.getElementById('pilihModel').addEventListener('change', (e) => {
     indeksModel = parseInt(e.target.value, 10);
     sesiModel = null;
@@ -662,6 +971,10 @@ async function isiLive() {
     if (!v.srcObject) v.currentTime = 0;           // video file diputar dari awal
     bersihkanError();
   });
+
+  document.getElementById('btnCsv').addEventListener('click', unduhCSV);
+  document.getElementById('btnSalin').addEventListener('click', salinRingkasan);
+  perbaruiRingkasan();
 
   putaran();
 }
