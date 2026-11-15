@@ -81,7 +81,7 @@ let riwayat = [], nomorRiwayat = 0;
 let namaUpload = '';
 
 // ---------- Statistik sesi (untuk ringkasan) ----------
-const AMBANG_WASPADA = 20;             // status WASPADA bila kepatuhan di bawah ambang tetapi masih dalam selisih ini (poin %)
+const targetminimal_WASPADA = 20;             // status WASPADA bila kepatuhan di bawah target minimal tetapi masih dalam selisih ini (poin %)
 let sesiMulai = null, sesiAkhir = null, durasiMs = 0, tPutaranTerakhir = performance.now();
 let fpsJumlah = 0, fpsHitung = 0, msJumlah = 0, msHitung = 0, confJumlah = 0, confHitung = 0;
 let grafikBucket = null, kunciBucket = '';
@@ -174,7 +174,7 @@ function saring(kotak) {
   return kotak.filter(k => k.cls && k.w <= MAKS_LEBAR_KOTAK);
 }
 
-const ambangDeteksi = () => Math.min(batasYakin, BATAS_RENDAH);
+const targetminimalDeteksi = () => Math.min(batasYakin, BATAS_RENDAH);
 
 function bacaKeluaran(out, skala, padX, padY, vw, vh, namaKelas) {
   const d = out.data, dim = out.dims;
@@ -189,7 +189,7 @@ function bacaKeluaran(out, skala, padX, padY, vw, vh, namaKelas) {
   if (dim[2] === 6) {                              // format end-to-end: [1, jumlah, 6]
     for (let i = 0; i < dim[1]; i++) {
       const o = i * 6, skor = d[o + 4];
-      if (skor < ambangDeteksi()) continue;
+      if (skor < targetminimalDeteksi()) continue;
       kotak.push({ cls: namaKelas[Math.round(d[o + 5])], conf: skor, rendah: skor < batasYakin,
                    ...ke01(d[o], d[o + 1], d[o + 2], d[o + 3]) });
     }
@@ -203,7 +203,7 @@ function bacaKeluaran(out, skala, padX, padY, vw, vh, namaKelas) {
       const s = d[(4 + c) * n + i];
       if (s > skor) { skor = s; terbaik = c; }
     }
-    if (skor < ambangDeteksi()) continue;
+    if (skor < targetminimalDeteksi()) continue;
     const cx = d[i], cy = d[n + i], w = d[2 * n + i], h = d[3 * n + i];
     kotak.push({ cls: namaKelas[terbaik], conf: skor, rendah: skor < batasYakin,
                  ...ke01(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2) });
@@ -432,19 +432,19 @@ function kelompokPelanggaran() {                   // pelanggar baru per 10 deti
 
 function hitungRingkasan() {
   const total = orangUnik.size, pel = pelanggarUnik.size, patuh = total - pel;
-  const ambang = (dataLive && dataLive.ambang_kepatuhan) || 80;
+  const targetminimal = (dataLive && dataLive.targetminimal_kepatuhan) || 80;
   const kep = total ? Math.round(patuh / total * 100) : null;
   let status = 'MENUNGGU DATA', warna = '#94a3b8';
   if (total) {
-    if (kep >= ambang) { status = 'AMAN'; warna = '#22c55e'; }
-    else if (kep >= ambang - AMBANG_WASPADA) { status = 'WASPADA'; warna = '#f59e0b'; }
+    if (kep >= targetminimal) { status = 'AMAN'; warna = '#22c55e'; }
+    else if (kep >= targetminimal - TARGETMINIMAL_WASPADA) { status = 'WASPADA'; warna = '#f59e0b'; }
     else { status = 'BAHAYA'; warna = '#ef4444'; }
   }
   const v = document.getElementById('video');
   const kel = kelompokPelanggaran();
   const detail = r => r ? 'Orang#' + r.id + ' pada ' + formatMenit(r.detikSesi) + ' (jam ' + r.jam + ')' : '-';
   return {
-    total, pel, patuh, ambang, kep, status, warna, kel,
+    total, pel, patuh, targetminimal, kep, status, warna, kel,
     durasi: Math.floor(durasiMs / 1000),
     tanggal: sesiMulai ? tanggalPanjang(sesiMulai) : '-',
     mulai: sesiMulai ? formatJam(sesiMulai) + ZONA() : '-',
@@ -468,7 +468,7 @@ function susunKalimat(r) {
   k += 'dashboard mendeteksi ' + r.total + ' orang dari sumber "' + r.sumber + '". ';
   if (r.pel) {
     k += r.pel + ' orang tidak memakai helm (' + r.daftarPelanggar.join(', ') + (r.pel > 6 ? ', dan lainnya' : '') + ') dan ' +
-         r.patuh + ' orang patuh, sehingga kepatuhan per orang ' + r.kep + '% (ambang ' + r.ambang + '%). ';
+         r.patuh + ' orang patuh, sehingga kepatuhan per orang ' + r.kep + '% (targetminimal ' + r.targetminimal + '%). ';
     k += 'Pelanggaran pertama: ' + r.pertama + '. ';
   } else {
     k += 'Semua orang memakai helm (kepatuhan 100%), tidak ada pelanggaran tercatat. ';
@@ -486,7 +486,7 @@ function teksLengkap(r) {
     'Total orang terdeteksi: ' + r.total,
     'Pelanggar             : ' + r.pel,
     'Patuh                 : ' + r.patuh,
-    'Kepatuhan per orang   : ' + (r.kep === null ? '-' : r.kep + '% (ambang ' + r.ambang + '%)'),
+    'Kepatuhan per orang   : ' + (r.kep === null ? '-' : r.kep + '% (targetminimal ' + r.targetminimal + '%)'),
     'Status                : ' + r.status,
     'Pelanggaran pertama   : ' + r.pertama,
     'Pelanggaran terakhir  : ' + r.terakhir,
@@ -748,8 +748,8 @@ function perbaruiAngka(dets) {
   const helm = dets.filter(d => d.cls === 'helmet').length;
   const no = dets.length - helm;
   const persen = dets.length ? Math.round(helm / dets.length * 100) : 0;
-  const ambang = (dataLive && dataLive.ambang_kepatuhan) || 80;
-  const aman = persen >= ambang;
+  const targetminimal = (dataLive && dataLive.targetminimal_kepatuhan) || 80;
+  const aman = persen >= targetminimal;
 
   const v = document.getElementById('video');
   const detik = Math.floor(v.currentTime);
