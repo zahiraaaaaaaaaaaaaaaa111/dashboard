@@ -8,7 +8,7 @@
 //  - Riwayat pelanggaran (Orang#ID, foto, jam, sumber) + unduh CSV
 //  - Ringkasan sesi: tanggal/jam, status AMAN/WASPADA/BAHAYA, kalimat otomatis,
 //    waktu pelanggaran + grafik, kinerja aplikasi, tombol salin untuk slide
-//  - Pilihan model v1 / v2 (menu di atas video)
+//  - Pilihan model v1 / v2 / v3 (menu di atas video)
 // =====================================================
 
 // ---------- Membaca file JSON ----------
@@ -23,27 +23,36 @@ async function muatJSON(path) {
 let dataLive, grafikTren, grafikDonat;
 let detikTerakhir = -1;
 
-// Daftar video dummy (kotak dari keyframe)
+// ---------- DAFTAR VIDEO ----------
+// Cara menambah video: taruh file mp4 di folder videos, lalu tambah SATU baris di daftar ini.
+// Video biasa dideteksi oleh model, jadi tidak butuh file JSON apa pun. Contoh:
+//   { nama: 'Gudang - lantai 1', video: 'videos/gudang_1.mp4' },
+// Daftar boleh kosong: dashboard tetap bisa dipakai lewat Kamera Live atau Upload video.
+// (Video dummy lama berbentuk { nama: '...', file: 'data/detections_01.json' } masih didukung, tapi tidak wajib.)
 const daftarVideo = [
-  { nama: 'Video 1 - dummy_01', file: 'data/detections_01.json' },
-  { nama: 'Video 2 - dummy_02', file: 'data/detections_02.json' },
-  { nama: 'Video 3 - dummy_03', file: 'data/detections_03.json' },
-  { nama: 'Video 4 - dummy_04', file: 'data/detections_04.json' }
+ { nama: 'Video contoh', video: 'videos/video_1.mp4' }
+  // { nama: 'Video 2', video: 'videos/video_2.mp4' }
 ];
+const AMBANG_BAWAAN = 80;              // target minimal kepatuhan per orang (%) untuk video biasa
 
-// ---------- DAFTAR MODEL (v2 dan v1) ----------
+async function siapkanVideo(entri) {
+  if (entri.file) return await muatJSON(entri.file);                     // video dummy lama (keyframe)
+  return { video: entri.video, ambang_kepatuhan: AMBANG_BAWAAN };        // video biasa
+}
+
+// ---------- DAFTAR MODEL (v2, v3, v1) ----------
 // Model baru: taruh file .onnx di folder onnx, lalu tambah satu baris di daftar ini.
 // Model PERTAMA di daftar = pilihan awal saat halaman dibuka.
-// - ukuran : harus sama dengan imgsz saat export (yolo export ... imgsz=416)
+// - ukuran : harus sama dengan imgsz saat export (yolo export ... imgsz=640)
 // - kelas  : urutan harus sama dengan model.names (0 = helmet, 1 = no_helmet)
 // - versi  : NAIKKAN angkanya bila isi file diganti dengan nama yang sama (supaya cache HP diperbarui)
 // Hapus baris yang file-nya belum ada di folder onnx.
-// (Untuk memasang v3 lagi nanti: taruh best_v3_640.onnx / best_v3_416.onnx di folder onnx,
-//  lalu tambahkan barisnya di sini, misalnya:
-//  { nama: 'Model v3 (akurat 640)', file: 'onnx/best_v3_640.onnx', versi: 1, ukuran: 640, kelas: ['helmet', 'no_helmet'] },)
+// Setelah model baru terbukti lebih baik, pindahkan barisnya ke paling atas agar jadi pilihan awal.
 const daftarModel = [
-  { nama: 'Model v2',            file: 'onnx/best_v2.onnx', versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] },
-  { nama: 'Model v1 (cadangan)', file: 'onnx/best.onnx',    versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] }
+  { nama: 'Model v2',              file: 'onnx/best_v2.onnx',     versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] },
+  { nama: 'Model v3 (akurat 640)', file: 'onnx/best_v3_640.onnx', versi: 2, ukuran: 640, kelas: ['helmet', 'no_helmet'] },
+  { nama: 'Model v3 (cepat 416)',  file: 'onnx/best_v3_416.onnx', versi: 2, ukuran: 416, kelas: ['helmet', 'no_helmet'] },
+  { nama: 'Model v1 (cadangan)',   file: 'onnx/best.onnx',        versi: 1, ukuran: 416, kelas: ['helmet', 'no_helmet'] }
 ];
 let indeksModel = 0;
 const modelSekarang = () => daftarModel[indeksModel];
@@ -68,7 +77,7 @@ let sesiModel = null, sedangMuat = false, sedangProses = false;
 let deteksiModel = [];
 let kameraStream = null;
 let urlUpload = null;
-let terakhirSumber = daftarVideo[0].file;
+let terakhirSumber = daftarVideo.length ? '0' : '';
 let waktuSelesai = [], msTerakhir = 0, daftarMs = [];
 
 let trek = [], idBerikut = 1;
@@ -705,6 +714,7 @@ function resetHitungan() {
 // ---------- Sumber kotak: model ATAU dummy ----------
 function ambilDeteksi(t) {
   if (modelAktif()) return deteksiModel;
+  if (!dataLive || !dataLive.tracks) return [];      // video biasa tanpa model: tidak ada kotak
 
   const hasil = [];
   for (const tr of dataLive.tracks) {
@@ -799,7 +809,7 @@ function putaran() {
 }
 
 async function isiLive() {
-  dataLive = await muatJSON(daftarVideo[0].file);
+  dataLive = daftarVideo.length ? await siapkanVideo(daftarVideo[0]) : { video: '', ambang_kepatuhan: AMBANG_BAWAAN };
 
   document.getElementById('live').innerHTML = `
     <h2>Monitoring Live · deteksi APD (helm)</h2>
@@ -807,7 +817,8 @@ async function isiLive() {
 
     <div class="panel-model">
       <select id="pilihVideo">
-        ${daftarVideo.map(v => `<option value="${v.file}">${v.nama}</option>`).join('')}
+        ${daftarVideo.length ? '' : '<option value="" disabled selected>Pilih sumber video...</option>'}
+        ${daftarVideo.map((v, i) => `<option value="${i}">${esc(v.nama)}</option>`).join('')}
         <option value="kamera">Kamera Live (HP / webcam)</option>
         <option value="upload">Upload video dari perangkat...</option>
       </select>
@@ -833,7 +844,7 @@ async function isiLive() {
 
     <div class="live-grid">
       <div class="vwrap">
-        <video id="video" src="${dataLive.video}" controls muted loop playsinline></video>
+        <video id="video" ${dataLive.video ? 'src="' + dataLive.video + '"' : ''} controls muted loop playsinline></video>
         <canvas id="kanvas"></canvas>
       </div>
       <div class="kolom-kpi">
@@ -906,6 +917,7 @@ async function isiLive() {
   });
 
   const v = document.getElementById('video');
+  if (daftarVideo[0] && !daftarVideo[0].file) { paksaModel(true); muatModel(); }   // video biasa: model aktif otomatis
   v.addEventListener('error', () => {
     if (!v.srcObject) tampilkanError('Video tidak bisa diputar. Periksa file video di folder videos atau gunakan format mp4.');
   });
@@ -937,18 +949,21 @@ async function isiLive() {
     bersihkanError();
     if (e.target.value === 'kamera') { await mulaiKamera(); return; }
     if (e.target.value === 'upload') { fileInput.click(); return; }
+    const entri = daftarVideo[parseInt(e.target.value, 10)];
+    if (!entri) return;
     hentikanKamera();
-    paksaModel(false);
     terakhirSumber = e.target.value;
     try {
-      dataLive = await muatJSON(terakhirSumber);
+      dataLive = await siapkanVideo(entri);
     } catch (err) {
-      tampilkanError('Data video tidak bisa dibaca: ' + terakhirSumber);
+      tampilkanError('Data video tidak bisa dibaca: ' + entri.nama);
       return;
     }
+    paksaModel(!entri.file);                       // video biasa: model wajib aktif
     v.src = dataLive.video;
     v.play();
     resetHitungan();
+    if (!entri.file) muatModel();
   });
 
   fileInput.addEventListener('change', () => {
