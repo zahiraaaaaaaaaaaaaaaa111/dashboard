@@ -6,6 +6,9 @@
 //  - Hitung pelanggar SEKALI per orang (tracking ID)
 //  - Upload video sebagai cadangan
 //  - Riwayat pelanggaran (Orang#ID, foto, jam, sumber) + unduh CSV
+//  - Menu: Monitoring | Riwayat Data | Laporan
+//  - Database browser (IndexedDB): data pelanggaran + sesi tersimpan permanen
+//  - CRUD (tambah/ubah/hapus), pencarian dan filter, ekspor CSV (riwayat + ringkasan keseluruhan)
 //  - Ringkasan sesi: tanggal/jam, status AMAN/WASPADA/BAHAYA, kalimat otomatis,
 //    waktu pelanggaran + grafik, kinerja aplikasi, tombol salin untuk slide
 //  - Pilihan model v1 / v2 / v3 (menu di atas video)
@@ -30,7 +33,7 @@ let detikTerakhir = -1;
 // Daftar boleh kosong: dashboard tetap bisa dipakai lewat Kamera Live atau Upload video.
 // (Video dummy lama berbentuk { nama: '...', file: 'data/detections_01.json' } masih didukung, tapi tidak wajib.)
 const daftarVideo = [
- { nama: 'Video contoh', video: 'videos/video_1.mp4' }
+  // { nama: 'Video 1', video: 'videos/video_1.mp4' },
   // { nama: 'Video 2', video: 'videos/video_2.mp4' }
 ];
 const AMBANG_BAWAAN = 80;              // target minimal kepatuhan per orang (%) untuk video biasa
@@ -86,12 +89,19 @@ let orangUnik = new Set(), pelanggarUnik = new Set();
 // ---------- Riwayat pelanggaran ----------
 const SIMPAN_FOTO = true;              // simpan foto kecil sebagai bukti tiap pelanggaran
 const MAKS_RIWAYAT = 300;              // batas jumlah catatan di layar
-let riwayat = [], nomorRiwayat = 0;
+let riwayat = [], nomorRiwayat = 0;         // catatan sesi berjalan (untuk ringkasan sesi)
+
+// ---------- Database (IndexedDB) ----------
+const DB_NAMA = 'apd-helm-db', DB_VERSI = 1;
+const DAFTAR_STATUS = ['Baru', 'Ditindaklanjuti', 'Diabaikan'];
+let db = null, dataDB = [], dataSesi = [], memoriId = 0, sesiKode = '';
+let modeForm = '', idEdit = null;
 let namaUpload = '';
 
 // ---------- Statistik sesi (untuk ringkasan) ----------
 const AMBANG_WASPADA = 20;             // status WASPADA bila kepatuhan di bawah ambang tetapi masih dalam selisih ini (poin %)
 let sesiMulai = null, sesiAkhir = null, durasiMs = 0, tPutaranTerakhir = performance.now();
+let sesiSumber = '', sesiModelLabel = '';   // dikunci saat sesi dimulai
 let fpsJumlah = 0, fpsHitung = 0, msJumlah = 0, msHitung = 0, confJumlah = 0, confHitung = 0;
 let grafikBucket = null, kunciBucket = '';
 
@@ -350,53 +360,411 @@ function ambilFoto(d) {                            // potongan kecil frame di se
 function catatPelanggaran(d) {
   const v = document.getElementById('video');
   const sekarang = new Date();
-  riwayat.push({
-    no: ++nomorRiwayat,
-    id: d.id,
-    tanggal: formatTanggal(sekarang),
-    jam: formatJam(sekarang),
-    posisi: formatMenit(v ? v.currentTime : 0),
-    sumber: namaSumber(),
-    model: modelAktif() ? modelSekarang().nama : 'Dummy (keyframe)',
-    detikSesi: durasiMs / 1000,
-    conf: d.conf,
-    foto: SIMPAN_FOTO ? ambilFoto(d) : ''
-  });
+  const tanggal = formatTanggal(sekarang), jam = formatJam(sekarang);
+  if (!sesiKode) sesiKode = String(sekarang.getTime());
+  riwayat.push({ no: ++nomorRiwayat, id: d.id, jam, detikSesi: durasiMs / 1000 });   // untuk ringkasan sesi
   if (riwayat.length > MAKS_RIWAYAT) riwayat.shift();
-  gambarRiwayat();
+  dbBuat({                                          // CREATE: simpan ke database
+    sesiKode, orang: d.id, nama: '', tanggal, jam, waktu: tanggal + 'T' + jam,
+    posisi: formatMenit(v ? v.currentTime : 0), sumber: sesiSumber || namaSumber(),
+    model: sesiModelLabel || (modelAktif() ? modelSekarang().nama : 'Dummy (keyframe)'),
+    conf: d.conf, foto: SIMPAN_FOTO ? ambilFoto(d) : '',
+    status: 'Baru', catatan: '', manual: false
+  });
   perbaruiRingkasan();
 }
 
-function gambarRiwayat() {
-  const tb = document.getElementById('isiRiwayat');
+// ---------- DATABASE: buka, baca, tulis ----------
+function bukaDB() {
+  return new Promise((ok, gagal) => {
+    if (!window.indexedDB) { gagal(new Error('IndexedDB tidak didukung browser ini')); return; }
+    const req = indexedDB.open(DB_NAMA, DB_VERSI);
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      if (!d.objectStoreNames.contains('pelanggaran')) {
+        const st = d.createObjectStore('pelanggaran', { keyPath: 'idDb', autoIncrement: true });
+        st.createIndex('sesiKode', 'sesiKode');
+        st.createIndex('waktu', 'waktu');
+      }
+      if (!d.objectStoreNames.contains('sesi')) d.createObjectStore('sesi', { keyPath: 'sesiKode' });
+    };
+    req.onsuccess = () => { db = req.result; ok(db); };
+    req.onerror = () => gagal(req.error);
+  });
+}
+const minta = req => new Promise((ok, gagal) => { req.onsuccess = () => ok(req.result); req.onerror = () => gagal(req.error); });
+const toko = (nama, mode = 'readonly') => db.transaction(nama, mode).objectStore(nama);
+
+async function muatDataDB() {
+  if (!db) return;
+  dataDB = await minta(toko('pelanggaran').getAll());
+  dataSesi = await minta(toko('sesi').getAll());
+}
+
+async function inisialisasiDB() {
+  try {
+    await bukaDB();
+    await muatDataDB();
+  } catch (e) {
+    console.error('Database gagal dibuka:', e);
+    tampilkanError('Database browser tidak tersedia (mungkin mode privat). Data tetap tampil selama halaman terbuka, tetapi tidak tersimpan permanen.');
+  }
+  gambarTabelData();
+  gambarLaporan();
+}
+
+// CREATE
+async function dbBuat(rekam) {
+  try {
+    if (db) { await minta(toko('pelanggaran', 'readwrite').add(rekam)); await muatDataDB(); }
+    else { rekam.idDb = ++memoriId; dataDB.push(rekam); }
+  } catch (e) { console.error(e); tampilkanError('Gagal menyimpan data: ' + e.message); }
+  gambarTabelData();
+  gambarLaporan();
+}
+
+// UPDATE
+async function dbUbah(rekam) {
+  try {
+    if (db) { await minta(toko('pelanggaran', 'readwrite').put(rekam)); await muatDataDB(); }
+    else { const i = dataDB.findIndex(r => r.idDb === rekam.idDb); if (i >= 0) dataDB[i] = rekam; }
+  } catch (e) { console.error(e); tampilkanError('Gagal mengubah data: ' + e.message); }
+  gambarTabelData();
+  gambarLaporan();
+}
+
+// DELETE
+async function dbHapus(idDb) {
+  try {
+    if (db) { await minta(toko('pelanggaran', 'readwrite').delete(idDb)); await muatDataDB(); }
+    else dataDB = dataDB.filter(r => r.idDb !== idDb);
+  } catch (e) { console.error(e); tampilkanError('Gagal menghapus data: ' + e.message); }
+  gambarTabelData();
+  gambarLaporan();
+}
+
+async function dbKosongkan() {
+  try {
+    if (db) {
+      await minta(toko('pelanggaran', 'readwrite').clear());
+      await minta(toko('sesi', 'readwrite').clear());
+      await muatDataDB();
+    } else { dataDB = []; dataSesi = []; }
+  } catch (e) { console.error(e); tampilkanError('Gagal mengosongkan database: ' + e.message); }
+  gambarTabelData();
+  gambarLaporan();
+}
+
+async function sesiHapus(kode) {                    // hapus satu sesi beserta catatan pelanggarannya
+  const idHapus = dataDB.filter(r => r.sesiKode === kode).map(r => r.idDb);
+  try {
+    if (db) {
+      const t = db.transaction(['pelanggaran', 'sesi'], 'readwrite');
+      idHapus.forEach(i => t.objectStore('pelanggaran').delete(i));
+      t.objectStore('sesi').delete(kode);
+      await new Promise((ok, gagal) => { t.oncomplete = ok; t.onerror = () => gagal(t.error); });
+      await muatDataDB();
+    } else {
+      dataDB = dataDB.filter(r => r.sesiKode !== kode);
+      dataSesi = dataSesi.filter(x => x.sesiKode !== kode);
+    }
+  } catch (e) { console.error(e); tampilkanError('Gagal menghapus sesi: ' + e.message); }
+  gambarTabelData();
+  gambarLaporan();
+}
+
+// Simpan ringkasan sesi yang sedang berjalan (boleh dipanggil berulang: data diperbarui, bukan digandakan)
+async function simpanSesi() {
+  if (!sesiKode || !sesiMulai) return false;
+  const r = hitungRingkasan();                      // semua nilai dibaca sekarang, sebelum state di-reset
+  if (!r.total && r.durasi < 5) return false;       // sesi kosong tidak disimpan
+  const akhir = sesiAkhir || new Date();
+  const rekam = {
+    sesiKode, mulai: sesiMulai.toISOString(), selesai: akhir.toISOString(),
+    tanggal: formatTanggal(sesiMulai), jamMulai: formatJam(sesiMulai), jamSelesai: formatJam(akhir),
+    durasi: r.durasi, sumber: r.sumber, model: r.model,
+    total: r.total, pelanggar: r.pel, patuh: r.patuh, kepatuhan: r.kep, status: r.status, ambang: r.ambang,
+    fps: fpsHitung ? fpsJumlah / fpsHitung : null,
+    ms: msHitung ? msJumlah / msHitung : null,
+    conf: confHitung ? confJumlah / confHitung : null
+  };
+  try {
+    if (db) {
+      await minta(toko('sesi', 'readwrite').put(rekam));
+      dataSesi = await minta(toko('sesi').getAll());
+    } else {
+      const i = dataSesi.findIndex(x => x.sesiKode === rekam.sesiKode);
+      if (i >= 0) dataSesi[i] = rekam; else dataSesi.push(rekam);
+    }
+  } catch (e) { console.error(e); return false; }
+  return true;
+}
+setInterval(() => {                                 // simpan otomatis tiap 10 detik selama ada data
+  if (orangUnik.size) simpanSesi().then(() => { if (panelTerbuka('laporan')) gambarLaporan(); });
+}, 10000);
+
+// ---------- Menu ----------
+const panelTerbuka = nama => { const e = document.getElementById('panel-' + nama); return !!e && e.classList.contains('aktif'); };
+function bukaMenu(nama) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('aktif', p.id === 'panel-' + nama));
+  document.querySelectorAll('nav.menu button').forEach(b => b.classList.toggle('active', b.dataset.menu === nama));
+  if (nama === 'riwayat') gambarTabelData();
+  if (nama === 'laporan') gambarLaporan();
+}
+
+// ---------- Riwayat data: pencarian, tampilan, form ----------
+const nilai = id => { const e = document.getElementById(id); return e ? e.value : ''; };
+
+function dataTersaring() {                          // SEARCH + FILTER
+  const q = nilai('cari').trim().toLowerCase();
+  const st = nilai('filterStatus'), dari = nilai('filterDari'), sampai = nilai('filterSampai');
+  const cekSesi = document.getElementById('filterSesiIni');
+  const sesiIni = !!cekSesi && cekSesi.checked;
+  return dataDB.filter(r => {
+    if (st && r.status !== st) return false;
+    if (dari && r.tanggal < dari) return false;
+    if (sampai && r.tanggal > sampai) return false;
+    if (sesiIni && r.sesiKode !== sesiKode) return false;
+    if (q) {
+      const teks = ['Orang#' + r.orang, r.nama, r.catatan, r.sumber, r.model, r.status, r.tanggal, r.jam,
+                    r.manual ? 'manual' : 'otomatis'].join(' ').toLowerCase();
+      if (!teks.includes(q)) return false;
+    }
+    return true;
+  }).sort((a, b) => (a.waktu < b.waktu ? 1 : a.waktu > b.waktu ? -1 : b.idDb - a.idDb));
+}
+
+function gambarTabelData() {                        // READ
+  const tb = document.getElementById('isiData');
   if (!tb) return;
-  document.getElementById('kosongRiwayat').style.display = riwayat.length ? 'none' : 'block';
-  document.getElementById('jumlahRiwayat').textContent = riwayat.length;
-  tb.innerHTML = riwayat.slice().reverse().map(r => `
+  const daftar = dataTersaring();
+  document.getElementById('jumlahData').textContent =
+    daftar.length + (daftar.length !== dataDB.length ? ' dari ' + dataDB.length : '') + ' data';
+  document.getElementById('kosongData').style.display = daftar.length ? 'none' : 'block';
+  tb.innerHTML = daftar.map((r, i) => `
     <tr>
-      <td>${r.no}</td>
-      <td>${r.foto ? '<img src="' + r.foto + '" alt="Orang#' + r.id + '">' : '-'}</td>
-      <td><span class="badge-orang">Orang#${r.id}</span></td>
+      <td>${i + 1}</td>
+      <td>${r.foto ? '<img src="' + r.foto + '" alt="Orang#' + r.orang + '">' : '-'}</td>
+      <td><span class="badge-orang">Orang#${r.orang}</span></td>
+      <td>${esc(r.nama || '-')}</td>
+      <td>${r.tanggal}</td>
       <td>${r.jam}</td>
-      <td>${r.posisi}</td>
-      <td>${esc(r.sumber)}</td>
+      <td>${esc(r.sumber)}${r.manual ? ' <span class="sub">(manual)</span>' : ''}</td>
       <td>${esc(r.model)}</td>
-      <td>${r.conf.toFixed(2)}</td>
+      <td>${r.conf != null ? r.conf.toFixed(2) : '-'}</td>
+      <td><span class="badge-status st-${esc(r.status)}">${esc(r.status)}</span></td>
+      <td>${esc(r.catatan || '-')}</td>
+      <td class="aksi-baris">
+        <button class="tombol kecil" data-aksi="ubah" data-id="${r.idDb}">Ubah</button>
+        <button class="tombol kecil bahaya" data-aksi="hapus" data-id="${r.idDb}">Hapus</button>
+      </td>
     </tr>`).join('');
 }
 
-function unduhCSV() {
-  if (!riwayat.length) { tampilkanError('Belum ada pelanggaran yang bisa diunduh.'); return; }
-  const kutip = x => '"' + String(x).replace(/"/g, '""') + '"';
-  const kepala = ['No', 'Orang', 'Tanggal', 'Jam', 'Posisi video', 'Sumber', 'Model', 'Keyakinan'];
-  const baris = riwayat.map(r => [r.no, 'Orang#' + r.id, r.tanggal, r.jam, r.posisi,
-                                  r.sumber, r.model, r.conf.toFixed(2)].map(kutip).join(','));
-  const isi = '\ufeff' + [kepala.map(kutip).join(','), ...baris].join('\n');
+function bukaForm(mode, rekam) {
+  modeForm = mode;
+  idEdit = rekam ? rekam.idDb : null;
+  const sekarang = new Date();
+  document.getElementById('judulForm').textContent =
+    mode === 'ubah' ? 'Ubah data (Orang#' + rekam.orang + ')' : 'Tambah data pelanggaran secara manual';
+  document.getElementById('fOrang').value = rekam ? rekam.orang : '';
+  document.getElementById('fNama').value = rekam ? rekam.nama : '';
+  document.getElementById('fTanggal').value = rekam ? rekam.tanggal : formatTanggal(sekarang);
+  document.getElementById('fJam').value = rekam ? rekam.jam : formatJam(sekarang);
+  document.getElementById('fSumber').value = rekam ? rekam.sumber : '';
+  document.getElementById('fStatus').value = rekam ? rekam.status : 'Baru';
+  document.getElementById('fCatatan').value = rekam ? rekam.catatan : '';
+  document.getElementById('pesanForm').textContent = '';
+  document.getElementById('formData').classList.add('tampil');
+}
+
+function tutupForm() {
+  document.getElementById('formData').classList.remove('tampil');
+  modeForm = '';
+  idEdit = null;
+}
+
+async function simpanForm() {                       // CREATE (manual) atau UPDATE
+  const orang = parseInt(nilai('fOrang'), 10);
+  const tanggal = nilai('fTanggal'), jam = nilai('fJam');
+  const masalah = [];
+  if (!(orang >= 1)) masalah.push('Nomor orang harus angka 1 atau lebih.');
+  if (!tanggal) masalah.push('Tanggal wajib diisi.');
+  if (!jam) masalah.push('Jam wajib diisi.');
+  if (masalah.length) { document.getElementById('pesanForm').textContent = masalah.join(' '); return; }
+  const jamPenuh = jam.length === 5 ? jam + ':00' : jam;
+  const isi = {
+    orang, nama: nilai('fNama').trim(), tanggal, jam: jamPenuh, waktu: tanggal + 'T' + jamPenuh,
+    sumber: nilai('fSumber').trim() || '-', status: nilai('fStatus'), catatan: nilai('fCatatan').trim()
+  };
+  if (modeForm === 'ubah') {
+    const lama = dataDB.find(r => r.idDb === idEdit);
+    if (!lama) { document.getElementById('pesanForm').textContent = 'Data tidak ditemukan (mungkin sudah dihapus).'; return; }
+    await dbUbah({ ...lama, ...isi });
+  } else {
+    await dbBuat({ sesiKode: 'manual', posisi: '-', model: '-', conf: null, foto: '', manual: true, ...isi });
+  }
+  tutupForm();
+}
+
+// ---------- Laporan keseluruhan ----------
+const namaBulan = kunci => { const [y, m] = kunci.split('-').map(Number); return new Date(y, m - 1, 1).toLocaleDateString('id-ID', { month: 'long', year: 'numeric' }); };
+const tanggalDariISO = t => { const [y, m, d] = t.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }); };
+const rata = (daftar, f) => { const x = daftar.map(f).filter(n => n != null); return x.length ? x.reduce((a, b) => a + b, 0) / x.length : null; };
+
+function kelompokkan(kunciFn) {                     // gabungkan data per bulan / per hari
+  const peta = {};
+  const ambil = k => (peta[k] = peta[k] || { pelanggaran: 0, sesi: 0, orang: 0, pelanggar: 0 });
+  dataDB.forEach(r => { ambil(kunciFn(r.tanggal)).pelanggaran++; });
+  dataSesi.forEach(x => { const g = ambil(kunciFn(x.tanggal)); g.sesi++; g.orang += x.total; g.pelanggar += x.pelanggar; });
+  return Object.keys(peta).sort().map(k => ({ kunci: k, ...peta[k] }));
+}
+
+function hitungLaporan() {
+  const sesi = dataSesi.slice().sort((a, b) => (a.mulai < b.mulai ? -1 : 1));
+  const totalOrang = sesi.reduce((n, x) => n + x.total, 0);
+  const totalPel = sesi.reduce((n, x) => n + x.pelanggar, 0);
+  const patuh = totalOrang - totalPel;
+  const kep = totalOrang ? Math.round(patuh / totalOrang * 100) : null;
+  const ambang = (dataLive && dataLive.ambang_kepatuhan) || AMBANG_BAWAAN;
+  let status = 'BELUM ADA DATA', warna = '#94a3b8';
+  if (kep !== null) {
+    if (kep >= ambang) { status = 'AMAN'; warna = '#22c55e'; }
+    else if (kep >= ambang - AMBANG_WASPADA) { status = 'WASPADA'; warna = '#f59e0b'; }
+    else { status = 'BAHAYA'; warna = '#ef4444'; }
+  }
+  const perStatus = {};
+  dataDB.forEach(r => { perStatus[r.status] = (perStatus[r.status] || 0) + 1; });
+  const semuaTanggal = [...dataDB.map(r => r.tanggal), ...sesi.map(x => x.tanggal)].filter(Boolean).sort();
+  const awal = semuaTanggal[0], akhir = semuaTanggal[semuaTanggal.length - 1];
+  return {
+    sesi, totalOrang, totalPel, patuh, kep, ambang, status, warna, perStatus,
+    rentang: awal ? (awal === akhir ? tanggalDariISO(awal) : tanggalDariISO(awal) + ' s/d ' + tanggalDariISO(akhir)) : '-',
+    perBulan: kelompokkan(t => t.slice(0, 7)),
+    perHari: kelompokkan(t => t),
+    fps: rata(sesi, x => x.fps), ms: rata(sesi, x => x.ms), conf: rata(sesi, x => x.conf)
+  };
+}
+
+function kalimatLaporan(L) {
+  if (!L.sesi.length && !dataDB.length) return 'Belum ada data tersimpan. Jalankan pemantauan lalu kembali ke halaman ini, atau tambahkan data lewat menu Riwayat Data.';
+  let k = 'Rentang data: ' + L.rentang + '. Tersimpan ' + L.sesi.length + ' sesi pemantauan dengan total ' + L.totalOrang +
+          ' orang terdeteksi, ' + L.totalPel + ' di antaranya tanpa helm';
+  k += L.kep === null ? '. ' : ' (kepatuhan keseluruhan ' + L.kep + '%, target minimal ' + L.ambang + '%). ';
+  k += 'Terdapat ' + dataDB.length + ' catatan pelanggaran: ' +
+       DAFTAR_STATUS.map(s => (L.perStatus[s] || 0) + ' ' + s.toLowerCase()).join(', ') + '. ';
+  return k + 'Status keseluruhan: ' + L.status + '.';
+}
+
+const fmt1 = (n, satuan) => (n == null ? '-' : n.toFixed(1) + satuan);
+
+function gambarLaporan() {
+  const grid = document.getElementById('gridLaporan');
+  if (!grid) return;
+  const L = hitungLaporan();
+  const st = document.getElementById('statusLaporan');
+  st.textContent = L.status;  st.style.background = L.warna;
+  document.getElementById('kalimatLaporan').textContent = kalimatLaporan(L);
+  const kartuMini = (label, isi) => `<div class="mini"><div class="label">${label}</div><div class="nilai">${esc(isi)}</div></div>`;
+  grid.innerHTML = [
+    kartuMini('Rentang data', L.rentang),
+    kartuMini('Jumlah sesi', L.sesi.length),
+    kartuMini('Total orang terdeteksi', L.totalOrang),
+    kartuMini('Total pelanggar', L.totalPel),
+    kartuMini('Total patuh', L.patuh),
+    kartuMini('Kepatuhan keseluruhan', L.kep === null ? '-' : L.kep + '%'),
+    kartuMini('Catatan pelanggaran', dataDB.length),
+    ...DAFTAR_STATUS.map(s => kartuMini('Status ' + s, L.perStatus[s] || 0)),
+    kartuMini('Rata-rata FPS', fmt1(L.fps, ' FPS')),
+    kartuMini('Rata-rata latensi', fmt1(L.ms, ' ms')),
+    kartuMini('Rata-rata keyakinan', L.conf == null ? '-' : L.conf.toFixed(2))
+  ].join('');
+
+  const baris = (kolom) => '<tr>' + kolom.map(x => '<td>' + x + '</td>').join('') + '</tr>';
+  document.getElementById('isiBulan').innerHTML = L.perBulan.length
+    ? L.perBulan.map(g => baris([esc(namaBulan(g.kunci)), g.sesi, g.orang, g.pelanggar, g.pelanggaran])).join('')
+    : baris(['-', '-', '-', '-', '-']);
+  document.getElementById('isiHari').innerHTML = L.perHari.length
+    ? L.perHari.slice().reverse().map(g => baris([esc(tanggalDariISO(g.kunci)), g.sesi, g.orang, g.pelanggar, g.pelanggaran])).join('')
+    : baris(['-', '-', '-', '-', '-']);
+  document.getElementById('isiSesi').innerHTML = L.sesi.length
+    ? L.sesi.slice().reverse().map((x, i) => baris([
+        L.sesi.length - i, esc(tanggalDariISO(x.tanggal)), x.jamMulai + '–' + x.jamSelesai, formatMenit(x.durasi),
+        esc(x.sumber), esc(x.model), x.total, x.pelanggar, x.kepatuhan == null ? '-' : x.kepatuhan + '%', esc(x.status),
+        '<button class="tombol kecil bahaya" data-aksi="hapusSesi" data-kode="' + esc(x.sesiKode) + '">Hapus</button>'
+      ])).join('')
+    : baris(['-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-']);
+}
+
+// ---------- Ekspor CSV (file handling) ----------
+const kutipCSV = x => '"' + String(x == null ? '' : x).replace(/"/g, '""') + '"';
+const barisCSV = kolom => kolom.map(kutipCSV).join(',');
+
+function unduhFile(namaFile, isi) {                 // menulis teks ke file lalu mengunduhnya
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([isi], { type: 'text/csv;charset=utf-8' }));
-  a.download = 'riwayat_pelanggaran.csv';
+  a.href = URL.createObjectURL(new Blob(['\ufeff' + isi], { type: 'text/csv;charset=utf-8' }));
+  a.download = namaFile;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+const KEPALA_RIWAYAT = ['ID', 'Sesi', 'Orang', 'Nama pekerja', 'Tanggal', 'Jam', 'Posisi video', 'Sumber', 'Model',
+                        'Keyakinan', 'Status', 'Catatan', 'Asal data'];
+const barisRiwayat = r => barisCSV([r.idDb, r.sesiKode, 'Orang#' + r.orang, r.nama, r.tanggal, r.jam, r.posisi, r.sumber,
+                                    r.model, r.conf != null ? r.conf.toFixed(2) : '', r.status, r.catatan,
+                                    r.manual ? 'Manual' : 'Otomatis (deteksi)']);
+
+function unduhCSV() {                               // riwayat sesuai pencarian dan filter yang sedang tampil
+  const daftar = dataTersaring();
+  if (!daftar.length) { tampilkanError('Tidak ada data yang bisa diunduh (cek pencarian dan filter).'); return; }
+  unduhFile('riwayat_pelanggaran_' + formatTanggal(new Date()) + '.csv',
+            [barisCSV(KEPALA_RIWAYAT), ...daftar.map(barisRiwayat)].join('\n'));
+}
+
+function unduhCSVLengkap() {                        // seluruh riwayat, tanpa filter
+  if (!dataDB.length) { tampilkanError('Belum ada data riwayat untuk diunduh.'); return; }
+  const semua = dataDB.slice().sort((a, b) => (a.waktu < b.waktu ? -1 : 1));
+  unduhFile('riwayat_lengkap_' + formatTanggal(new Date()) + '.csv',
+            [barisCSV(KEPALA_RIWAYAT), ...semua.map(barisRiwayat)].join('\n'));
+}
+
+function unduhCSVRingkasan() {                      // merangkum seluruh data tersimpan
+  if (!dataSesi.length && !dataDB.length) { tampilkanError('Belum ada data tersimpan untuk dirangkum.'); return; }
+  const L = hitungLaporan();
+  const sekarang = new Date();
+  const b = [];
+  const tambah = (...kolom) => b.push(barisCSV(kolom));
+  tambah('RINGKASAN KESELURUHAN');
+  tambah('Dibuat pada', tanggalPanjang(sekarang) + ' pukul ' + formatJam(sekarang) + ZONA());
+  tambah('Rentang data', L.rentang);
+  tambah('Jumlah sesi pemantauan', L.sesi.length);
+  tambah('Total orang terdeteksi', L.totalOrang);
+  tambah('Total pelanggar (orang)', L.totalPel);
+  tambah('Total patuh (orang)', L.patuh);
+  tambah('Kepatuhan keseluruhan', L.kep === null ? '-' : L.kep + '%');
+  tambah('Target minimal kepatuhan', L.ambang + '%');
+  tambah('Status keseluruhan', L.status);
+  tambah('Catatan pelanggaran tersimpan', dataDB.length);
+  DAFTAR_STATUS.forEach(s => tambah('Catatan berstatus ' + s, L.perStatus[s] || 0));
+  tambah('Rata-rata FPS', L.fps == null ? '-' : L.fps.toFixed(1));
+  tambah('Rata-rata latensi (ms)', L.ms == null ? '-' : Math.round(L.ms));
+  tambah('Rata-rata keyakinan', L.conf == null ? '-' : L.conf.toFixed(2));
+  b.push('');
+  tambah('RINGKASAN PER BULAN');
+  tambah('Bulan', 'Jumlah sesi', 'Orang terdeteksi', 'Pelanggar', 'Catatan pelanggaran');
+  L.perBulan.forEach(g => tambah(namaBulan(g.kunci), g.sesi, g.orang, g.pelanggar, g.pelanggaran));
+  b.push('');
+  tambah('RINGKASAN PER HARI');
+  tambah('Tanggal', 'Hari dan tanggal', 'Jumlah sesi', 'Orang terdeteksi', 'Pelanggar', 'Catatan pelanggaran');
+  L.perHari.forEach(g => tambah(g.kunci, tanggalDariISO(g.kunci), g.sesi, g.orang, g.pelanggar, g.pelanggaran));
+  b.push('');
+  tambah('RINGKASAN PER SESI');
+  tambah('No', 'Kode sesi', 'Tanggal', 'Mulai', 'Selesai', 'Durasi', 'Sumber', 'Model', 'Orang terdeteksi', 'Pelanggar',
+         'Patuh', 'Kepatuhan (%)', 'Status', 'FPS', 'Latensi (ms)', 'Keyakinan');
+  L.sesi.forEach((x, i) => tambah(i + 1, x.sesiKode, tanggalDariISO(x.tanggal), x.jamMulai, x.jamSelesai, formatMenit(x.durasi),
+         x.sumber, x.model, x.total, x.pelanggar, x.patuh, x.kepatuhan == null ? '' : x.kepatuhan, x.status,
+         x.fps == null ? '' : x.fps.toFixed(1), x.ms == null ? '' : Math.round(x.ms), x.conf == null ? '' : x.conf.toFixed(2)));
+  unduhFile('ringkasan_keseluruhan_' + formatTanggal(sekarang) + '.csv', b.join('\n'));
 }
 
 // ---------- Ringkasan sesi ----------
@@ -460,8 +828,8 @@ function hitungRingkasan() {
     selesai: sesiAkhir ? formatJam(sesiAkhir) + ZONA() : '-',
     pertama: detail(riwayat[0]), terakhir: detail(riwayat[riwayat.length - 1]),
     tersibuk: kel.puncak,
-    sumber: namaSumber(),
-    model: modelAktif() ? modelSekarang().nama + ' (input ' + modelSekarang().ukuran + ')' : 'Dummy (keyframe)',
+    sumber: sesiSumber || namaSumber(),
+    model: sesiModelLabel || (modelAktif() ? modelSekarang().nama + ' (input ' + modelSekarang().ukuran + ')' : 'Dummy (keyframe)'),
     resolusi: v && v.videoWidth ? v.videoWidth + ' × ' + v.videoHeight : '-',
     fps: fpsHitung ? (fpsJumlah / fpsHitung).toFixed(1) + ' FPS' : '-',
     ms: msHitung ? Math.round(msJumlah / msHitung) + ' ms' : '-',
@@ -696,12 +1064,13 @@ function pakaiVideoUpload(file) {
 }
 
 function resetHitungan() {
+  simpanSesi();                                    // sesi yang berakhir disimpan ke database (dibaca sinkron sebelum dikosongkan)
   detikTerakhir = -1;
   trek = [];  idBerikut = 1;
   orangUnik = new Set();  pelanggarUnik = new Set();
   deteksiModel = [];
   waktuSelesai = [];  daftarMs = [];
-  riwayat = [];  nomorRiwayat = 0;  gambarRiwayat();
+  riwayat = [];  nomorRiwayat = 0;  sesiKode = '';  sesiSumber = '';  sesiModelLabel = '';
   sesiMulai = null;  sesiAkhir = null;  durasiMs = 0;
   fpsJumlah = 0;  fpsHitung = 0;  msJumlah = 0;  msHitung = 0;  confJumlah = 0;  confHitung = 0;
   kunciBucket = '';  perbaruiRingkasan();
@@ -743,6 +1112,7 @@ function gambarKotak(dets) {
   const c = document.getElementById('kanvas');
   const ctx = c.getContext('2d');
   c.width = v.clientWidth;  c.height = v.clientHeight;
+  if (!c.width) return;                            // panel Monitoring sedang tersembunyi
   ctx.lineWidth = 3;  ctx.font = 'bold 14px Arial';
   for (const d of dets) {
     const warna = d.cls === 'helmet' ? '#22c55e' : '#ef4444';
@@ -795,7 +1165,11 @@ function putaran() {
   const v = document.getElementById('video');
   const tNow = performance.now();
   if (v && v.videoWidth && !v.paused) {            // hitung durasi pemantauan yang benar-benar berjalan
-    if (!sesiMulai) sesiMulai = new Date();
+    if (!sesiMulai) {
+      sesiMulai = new Date();  sesiKode = String(sesiMulai.getTime());
+      sesiSumber = namaSumber();
+      sesiModelLabel = modelAktif() ? modelSekarang().nama + ' (input ' + modelSekarang().ukuran + ')' : 'Dummy (keyframe)';
+    }
     durasiMs += Math.min(tNow - tPutaranTerakhir, 250);
     sesiAkhir = new Date();
   }
@@ -812,9 +1186,15 @@ async function isiLive() {
   dataLive = daftarVideo.length ? await siapkanVideo(daftarVideo[0]) : { video: '', ambang_kepatuhan: AMBANG_BAWAAN };
 
   document.getElementById('live').innerHTML = `
-    <h2>Monitoring Live · deteksi APD (helm)</h2>
+    <nav class="menu">
+      <button data-menu="monitor" class="active">Monitoring</button>
+      <button data-menu="riwayat">Riwayat Data</button>
+      <button data-menu="laporan">Laporan</button>
+    </nav>
     <div id="pesanError" class="error-box"></div>
 
+    <div class="panel aktif" id="panel-monitor">
+    <h2>Monitoring Live · deteksi APD (helm)</h2>
     <div class="panel-model">
       <select id="pilihVideo">
         ${daftarVideo.length ? '' : '<option value="" disabled selected>Pilih sumber video...</option>'}
@@ -870,26 +1250,93 @@ async function isiLive() {
       ${ringkasanHTML()}
       <div class="chart-box kecil"><canvas id="cBucket"></canvas></div>
       <div class="sub">Jumlah orang dihitung dari ID pelacak. Bila orang tertutup atau bergerak cepat, satu orang bisa mendapat dua ID.
-        Ringkasan ikut dikosongkan saat Reset, saat berganti sumber atau model, dan saat video mengulang.</div>
-    </div>
-
-    <div class="kartu riwayat">
-      <div class="judul">
-        <h2>Riwayat Pelanggaran (<span id="jumlahRiwayat">0</span> orang)</h2>
-        <button id="btnCsv">Unduh CSV</button>
-      </div>
-      <div class="gulir">
-        <table class="tabel-riwayat">
-          <thead><tr><th>No</th><th>Foto</th><th>Orang</th><th>Jam</th><th>Posisi video</th><th>Sumber</th><th>Model</th><th>Yakin</th></tr></thead>
-          <tbody id="isiRiwayat"></tbody>
-        </table>
-      </div>
-      <div class="sub" id="kosongRiwayat">Belum ada pelanggaran tercatat. Setiap orang yang terdeteksi tanpa helm dicatat satu kali.</div>
+        Ringkasan sesi dikosongkan saat Reset, saat berganti sumber atau model, dan saat video mengulang. Setiap sesi dan pelanggaran otomatis tersimpan di database browser (lihat menu Riwayat Data dan Laporan).</div>
     </div>
 
     <div class="dua-kolom">
       <div class="chart-box"><canvas id="cTren"></canvas></div>
       <div class="chart-box"><canvas id="cDonat"></canvas></div>
+    </div>
+    </div>
+
+    <div class="panel" id="panel-riwayat">
+      <div class="kartu">
+        <div class="judul">
+          <h2>Riwayat Data Pelanggaran (<span id="jumlahData">0 data</span>)</h2>
+          <div class="aksi">
+            <button class="tombol" id="btnTambah">+ Tambah data</button>
+            <button class="tombol" id="btnCsv">Unduh CSV (data yang tampil)</button>
+            <button class="tombol bahaya" id="btnHapusSemua">Hapus semua data</button>
+          </div>
+        </div>
+
+        <div class="filter-bar">
+          <input type="text" id="cari" placeholder="Cari: Orang#, nama, catatan, sumber, model, tanggal...">
+          <select id="filterStatus"><option value="">Semua status</option>${DAFTAR_STATUS.map(x => `<option value="${x}">${x}</option>`).join('')}</select>
+          <label>Dari <input type="date" id="filterDari"></label>
+          <label>Sampai <input type="date" id="filterSampai"></label>
+          <label><input type="checkbox" id="filterSesiIni"> Sesi ini saja</label>
+          <button class="tombol" id="btnResetFilter">Reset filter</button>
+        </div>
+
+        <div id="formData" class="form-data">
+          <h3 id="judulForm">Tambah data</h3>
+          <div class="grid-form">
+            <label>Orang # <input type="number" id="fOrang" min="1" step="1"></label>
+            <label>Nama pekerja (opsional) <input type="text" id="fNama" maxlength="60"></label>
+            <label>Tanggal <input type="date" id="fTanggal"></label>
+            <label>Jam <input type="time" id="fJam" step="1"></label>
+            <label>Sumber / lokasi <input type="text" id="fSumber" maxlength="80"></label>
+            <label>Status <select id="fStatus">${DAFTAR_STATUS.map(x => `<option value="${x}">${x}</option>`).join('')}</select></label>
+            <label class="lebar">Catatan <textarea id="fCatatan" rows="2" maxlength="300"></textarea></label>
+          </div>
+          <div id="pesanForm" class="pesan-form"></div>
+          <button class="tombol" id="btnSimpanForm">Simpan</button>
+          <button class="tombol" id="btnBatalForm">Batal</button>
+        </div>
+
+        <div class="gulir">
+          <table class="tabel-riwayat">
+            <thead><tr><th>No</th><th>Foto</th><th>Orang</th><th>Nama</th><th>Tanggal</th><th>Jam</th><th>Sumber</th>
+              <th>Model</th><th>Yakin</th><th>Status</th><th>Catatan</th><th>Aksi</th></tr></thead>
+            <tbody id="isiData"></tbody>
+          </table>
+        </div>
+        <div class="sub" id="kosongData">Belum ada data. Orang yang terdeteksi tanpa helm dicatat otomatis (satu kali per orang), atau tambahkan manual.</div>
+      </div>
+    </div>
+
+    <div class="panel" id="panel-laporan">
+      <div class="kartu ringkasan">
+        <div class="judul">
+          <h2>Laporan Keseluruhan</h2>
+          <div class="aksi">
+            <span id="statusLaporan" class="status-besar">BELUM ADA DATA</span>
+            <button class="tombol" id="btnCsvRingkasan">Unduh CSV Ringkasan</button>
+            <button class="tombol" id="btnCsvLengkap">Unduh CSV Riwayat Lengkap</button>
+            <button class="tombol" id="btnSimpanSesi">Simpan sesi sekarang</button>
+          </div>
+        </div>
+        <p id="kalimatLaporan" class="kalimat">Belum ada data tersimpan.</p>
+        <div class="grid-ringkas" id="gridLaporan"></div>
+
+        <h3>Ringkasan per bulan</h3>
+        <div class="gulir"><table class="tabel-riwayat">
+          <thead><tr><th>Bulan</th><th>Sesi</th><th>Orang terdeteksi</th><th>Pelanggar</th><th>Catatan pelanggaran</th></tr></thead>
+          <tbody id="isiBulan"></tbody></table></div>
+
+        <h3>Ringkasan per hari</h3>
+        <div class="gulir"><table class="tabel-riwayat">
+          <thead><tr><th>Tanggal</th><th>Sesi</th><th>Orang terdeteksi</th><th>Pelanggar</th><th>Catatan pelanggaran</th></tr></thead>
+          <tbody id="isiHari"></tbody></table></div>
+
+        <h3>Daftar sesi pemantauan</h3>
+        <div class="gulir"><table class="tabel-riwayat">
+          <thead><tr><th>No</th><th>Tanggal</th><th>Waktu</th><th>Durasi</th><th>Sumber</th><th>Model</th><th>Orang</th>
+            <th>Pelanggar</th><th>Kepatuhan</th><th>Status</th><th>Aksi</th></tr></thead>
+          <tbody id="isiSesi"></tbody></table></div>
+        <div class="sub">Data disimpan di database browser (IndexedDB) pada perangkat ini. Data tidak ikut ke perangkat lain dan hilang bila data situs dihapus dari browser.</div>
+      </div>
     </div>`;
 
   const teks = { ticks: { color: '#94a3b8' } };
@@ -987,9 +1434,55 @@ async function isiLive() {
     bersihkanError();
   });
 
-  document.getElementById('btnCsv').addEventListener('click', unduhCSV);
   document.getElementById('btnSalin').addEventListener('click', salinRingkasan);
   perbaruiRingkasan();
+
+  // Menu
+  document.querySelectorAll('nav.menu button').forEach(b => b.addEventListener('click', () => bukaMenu(b.dataset.menu)));
+
+  // Riwayat Data: cari, filter, tombol
+  ['cari', 'filterStatus', 'filterDari', 'filterSampai', 'filterSesiIni'].forEach(id => {
+    const e = document.getElementById(id);
+    e.addEventListener(e.type === 'text' ? 'input' : 'change', gambarTabelData);
+  });
+  document.getElementById('btnResetFilter').addEventListener('click', () => {
+    ['cari', 'filterStatus', 'filterDari', 'filterSampai'].forEach(id => { document.getElementById(id).value = ''; });
+    document.getElementById('filterSesiIni').checked = false;
+    gambarTabelData();
+  });
+  document.getElementById('btnTambah').addEventListener('click', () => bukaForm('tambah', null));
+  document.getElementById('btnSimpanForm').addEventListener('click', simpanForm);
+  document.getElementById('btnBatalForm').addEventListener('click', tutupForm);
+  document.getElementById('btnCsv').addEventListener('click', unduhCSV);
+  document.getElementById('btnHapusSemua').addEventListener('click', async () => {
+    if (!dataDB.length && !dataSesi.length) return;
+    if (confirm('Hapus SEMUA data (' + dataDB.length + ' catatan dan ' + dataSesi.length + ' sesi) dari database? Tindakan ini tidak bisa dibatalkan.')) await dbKosongkan();
+  });
+  document.getElementById('isiData').addEventListener('click', async (e) => {     // UPDATE dan DELETE per baris
+    const t = e.target.closest('button');
+    if (!t) return;
+    const id = parseInt(t.dataset.id, 10);
+    const r = dataDB.find(x => x.idDb === id);
+    if (!r) return;
+    if (t.dataset.aksi === 'ubah') bukaForm('ubah', r);
+    if (t.dataset.aksi === 'hapus' && confirm('Hapus data Orang#' + r.orang + ' (' + r.tanggal + ' ' + r.jam + ')?')) await dbHapus(id);
+  });
+
+  // Laporan
+  document.getElementById('btnCsvRingkasan').addEventListener('click', unduhCSVRingkasan);
+  document.getElementById('btnCsvLengkap').addEventListener('click', unduhCSVLengkap);
+  document.getElementById('btnSimpanSesi').addEventListener('click', async () => {
+    const ok = await simpanSesi();
+    if (!ok) tampilkanError('Belum ada sesi berjalan yang bisa disimpan (belum ada orang terdeteksi).');
+    gambarLaporan();
+  });
+  document.getElementById('isiSesi').addEventListener('click', async (e) => {
+    const t = e.target.closest('button');
+    if (!t || t.dataset.aksi !== 'hapusSesi') return;
+    if (confirm('Hapus sesi ini beserta semua catatan pelanggarannya?')) await sesiHapus(t.dataset.kode);
+  });
+
+  inisialisasiDB();
 
   putaran();
 }
