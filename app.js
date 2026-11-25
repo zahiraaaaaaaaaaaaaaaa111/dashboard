@@ -33,8 +33,9 @@ let detikTerakhir = -1;
 // Daftar boleh kosong: dashboard tetap bisa dipakai lewat Kamera Live atau Upload video.
 // (Video dummy lama berbentuk { nama: '...', file: 'data/detections_01.json' } masih didukung, tapi tidak wajib.)
 const daftarVideo = [
-  // { nama: 'Video 1', video: 'videos/video_1.mp4' },
-  // { nama: 'Video 2', video: 'videos/video_2.mp4' }
+  { nama: 'Video percobaan', video: 'videos/video_percobaan.mp4' }
+  // Video lain: tambahkan koma di akhir baris di atas, lalu baris baru seperti ini:
+  // { nama: 'Video gudang', video: 'videos/gudang_1.mp4' }
 ];
 const AMBANG_BAWAAN = 80;              // target minimal kepatuhan per orang (%) untuk video biasa
 
